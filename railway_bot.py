@@ -41,6 +41,7 @@ class PCBridge:
         self.api_key = api_key
         self.pc_online = False
         self.last_check = 0
+        logger.info(f"🔧 PCBridge инициализирован с URL: {api_url}")
     
     def check_status(self):
         now = time.time()
@@ -54,8 +55,11 @@ class PCBridge:
             }
             response = requests.get(f"{self.api_url}/ping", timeout=5, headers=headers)
             self.pc_online = response.status_code == 200
-        except:
+            if self.pc_online:
+                logger.info("✅ ПК в сети")
+        except Exception as e:
             self.pc_online = False
+            logger.error(f"❌ Ошибка проверки ПК: {e}")
         
         self.last_check = now
         return self.pc_online
@@ -94,19 +98,31 @@ class PCBridge:
             return {"online": True}
 
 # Инициализация
+logger.info("="*50)
+logger.info("🔧 ИНИЦИАЛИЗАЦИЯ PCBridge")
+logger.info(f"📦 PC_API_URL = '{PC_API_URL}'")
+logger.info(f"📦 PC_API_KEY = {'✅ есть' if PC_API_KEY else '❌ нет'}")
+
 pc_bridge = PCBridge(PC_API_URL, PC_API_KEY) if PC_API_URL and PC_API_KEY else None
+if pc_bridge:
+    logger.info("✅ PCBridge создан")
+else:
+    logger.warning("⚠️ PCBridge не создан")
 
 # ================= AI КЛАСС =================
 class OpenRouterAI:
     def __init__(self):
         self.api_key = OPENROUTER_API_KEY
         self.available = bool(self.api_key)
+        if self.available:
+            logger.info("✅ AI инициализирован")
     
     def generate(self, user_text):
         text_lower = user_text.lower()
         
         # Команды ПК
-        if any(word in text_lower for word in ["статус пк", "комп в сети"]):
+        if any(word in text_lower for word in ["статус пк", "комп в сети", "пк онлайн"]):
+            logger.info("🖥️ Команда: статус ПК")
             if pc_bridge:
                 if pc_bridge.check_status():
                     status = pc_bridge.get_pc_status()
@@ -115,7 +131,8 @@ class OpenRouterAI:
                     return "💤 Компьютер выключен"
             return "❌ ПК не настроен"
         
-        if any(word in text_lower for word in ["скриншот", "снимок экрана"]):
+        if any(word in text_lower for word in ["скриншот", "снимок экрана", "что на экране"]):
+            logger.info("📸 Команда: скриншот")
             if pc_bridge:
                 if pc_bridge.check_status():
                     return "🔍 Делаю скриншот..."
@@ -124,7 +141,7 @@ class OpenRouterAI:
         
         # OpenRouter
         if not self.available:
-            return "❌ Нет API ключа"
+            return "❌ Нет API ключа OpenRouter"
         
         try:
             response = requests.post(
@@ -138,66 +155,71 @@ class OpenRouterAI:
                     "messages": [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_text}
-                    ]
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": 2000
                 },
                 timeout=30
             )
             result = response.json()
             return result["choices"][0]["message"]["content"]
         except Exception as e:
+            logger.error(f"❌ Ошибка AI: {e}")
             return f"❌ Ошибка: {str(e)[:100]}"
 
 ai = OpenRouterAI()
 
 # ================= TELEGRAM ФУНКЦИИ (ИСПРАВЛЕННЫЕ) =================
 def send_message(chat_id, text, reply_to_message_id=None):
+    """Отправка сообщения - ПРОСТОЙ РАБОЧИЙ ВАРИАНТ"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     
-    # ПРАВИЛЬНАЯ КОДИРОВКА ДЛЯ РУССКИХ БУКВ
+    # Самый простой способ - requests сам всё закодирует
     data = {
         "chat_id": chat_id,
-        "text": text,
-        "reply_to_message_id": reply_to_message_id
+        "text": text
     }
     
-    # Отправляем с utf-8 кодировкой
-    headers = {'Content-Type': 'application/json; charset=utf-8'}
+    # Добавляем reply только если нужно
+    if reply_to_message_id:
+        data["reply_to_message_id"] = reply_to_message_id
     
     try:
-        response = requests.post(
-            url,
-            data=json.dumps(data, ensure_ascii=False).encode('utf-8'),
-            headers=headers,
-            timeout=5
-        )
+        # Просто передаём словарь - requests сам всё сделает правильно
+        response = requests.post(url, json=data, timeout=5)
         if not response.ok:
-            logger.error(f"Ошибка: {response.text}")
+            logger.error(f"Ошибка Telegram: {response.text}")
+            # Если ошибка - пробуем без reply
+            if reply_to_message_id:
+                data.pop("reply_to_message_id", None)
+                requests.post(url, json=data, timeout=5)
     except Exception as e:
         logger.error(f"Ошибка отправки: {e}")
 
 def send_photo(chat_id, photo_io, caption, reply_to_message_id=None):
+    """Отправка фото - ПРОСТОЙ РАБОЧИЙ ВАРИАНТ"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     
     files = {'photo': ('screenshot.png', photo_io, 'image/png')}
     data = {
         "chat_id": chat_id,
-        "reply_to_message_id": reply_to_message_id
+        "caption": caption
     }
     
-    # Добавляем caption с правильной кодировкой
-    if caption:
-        data["caption"] = caption.encode('utf-8')
+    if reply_to_message_id:
+        data["reply_to_message_id"] = reply_to_message_id
     
     try:
         response = requests.post(url, data=data, files=files, timeout=30)
         if not response.ok:
             logger.error(f"Ошибка фото: {response.text}")
-            send_message(chat_id, "❌ Ошибка отправки фото", reply_to_message_id)
+            send_message(chat_id, "❌ Не удалось отправить скриншот", reply_to_message_id)
     except Exception as e:
         logger.error(f"Ошибка: {e}")
         send_message(chat_id, f"❌ Ошибка: {str(e)[:100]}", reply_to_message_id)
 
 def send_action(chat_id, action):
+    """Отправка статуса 'печатает'"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
     try:
         requests.post(url, json={"chat_id": chat_id, "action": action}, timeout=2)
@@ -207,7 +229,20 @@ def send_action(chat_id, action):
 # ================= FLASK РОУТЫ =================
 @app.route('/')
 def home():
-    return "🤖 Бот работает!"
+    pc_status = "✅ В сети" if pc_bridge and pc_bridge.check_status() else "❌ Не в сети"
+    return f"""
+    <html>
+        <head><title>Джарвис Бот</title></head>
+        <body>
+            <h1>🤖 Джарвис Telegram Бот</h1>
+            <p>Статус: <b>✅ Работает</b></p>
+            <p>AI: {'✅ Доступен' if ai.available else '❌ Нет ключа'}</p>
+            <p>ПК: <b>{pc_status}</b></p>
+            <p>Время: {time.strftime('%Y-%m-%d %H:%M:%S')}</p>
+            <p><a href="/setwebhook">🔗 Установить вебхук</a></p>
+        </body>
+    </html>
+    """
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -219,9 +254,15 @@ def webhook():
             message_id = update["message"]["message_id"]
             text = update["message"].get("text", "")
             
+            logger.info(f"📨 Сообщение: {text[:50]}...")
+            
+            # Показываем что печатает
             send_action(chat_id, "typing")
+            
+            # Получаем ответ
             reply = ai.generate(text)
             
+            # Скриншот
             if "🔍 Делаю скриншот" in reply and pc_bridge:
                 send_action(chat_id, "upload_photo")
                 img_io, filename = pc_bridge.get_screenshot()
@@ -234,7 +275,7 @@ def webhook():
         
         return "OK", 200
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+        logger.error(f"❌ Ошибка в webhook: {e}")
         return "Error", 500
 
 @app.route('/setwebhook')
@@ -242,10 +283,34 @@ def set_webhook():
     railway_url = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
     if not railway_url:
         railway_url = request.host
+        if railway_url.startswith('localhost'):
+            return "❌ Локальный сервер"
+    
     webhook_url = f"https://{railway_url}/webhook"
-    r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook", params={"url": webhook_url})
-    return str(r.json())
+    response = requests.get(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook",
+        params={"url": webhook_url}
+    )
+    return json.dumps(response.json(), indent=2, ensure_ascii=False)
+
+@app.route('/status')
+def status():
+    pc_status = pc_bridge.get_pc_status() if pc_bridge else {"online": False}
+    return {
+        "bot_running": True,
+        "ai_available": ai.available,
+        "pc_online": pc_status.get("online", False),
+        "telegram_token_set": bool(TELEGRAM_TOKEN),
+        "openrouter_key_set": bool(OPENROUTER_API_KEY),
+        "pc_configured": bool(PC_API_URL),
+        "time": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
+    logger.info("="*50)
+    logger.info("🚀 ЗАПУСК ДЖАРВИС БОТА")
+    logger.info(f"✅ AI: {'доступен' if ai.available else 'недоступен'}")
+    logger.info(f"🖥️ ПК: {'настроен' if pc_bridge else 'не настроен'}")
+    logger.info("="*50)
     app.run(host="0.0.0.0", port=port)
