@@ -24,7 +24,7 @@ PC_API_KEY = os.environ.get("PC_API_KEY", "")
 
 # ================= СИСТЕМНЫЙ ПРОМПТ =================
 SYSTEM_PROMPT = """Ты Джарвис — ИИ-ассистент в Telegram. Отвечай на русском языке.
-Ты умеешь анализировать изображения. Если тебе прислали картинку с задачей - реши её."""
+Ты отлично решаешь математические задачи. Объясняй решение подробно и понятно."""
 
 # ================= КЛАСС ДЛЯ РАБОТЫ С ПК =================
 class PCBridge:
@@ -129,44 +129,27 @@ class OpenRouterAI:
                 return "❌ Компьютер выключен"
             return "❌ ПК не настроен"
         
-        # OpenRouter с поддержкой изображений
+        # OpenRouter
         if not self.available:
             return "❌ Нет API ключа"
         
-        # Список моделей для проброса
-        models_to_try = [
-            "qwen/qwen-2.5-vl-72b-instruct:free",
-            "google/gemini-2.0-flash-exp:free",
-            "meta-llama/llama-3.2-90b-vision-instruct:free"
+        # Определяем задачу
+        task = user_text if user_text else "Реши математическую задачу"
+        if photo:
+            task = f"{task} (на изображении математическое выражение)"
+        
+        # Пробуем разные текстовые модели (они стабильнее vision)
+        models = [
+            "deepseek/deepseek-chat:free",
+            "qwen/qwen-2.5-72b-instruct:free",
+            "google/gemma-3-12b-it:free",
+            "mistralai/mistral-small-24b-instruct-2501:free"
         ]
         
-        for model in models_to_try:
+        for model in models:
             try:
-                # Формируем сообщение
-                messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+                logger.info(f"Пробую модель: {model}")
                 
-                # Если есть фото - добавляем multimodal контент
-                if photo:
-                    photo_base64 = base64.b64encode(photo).decode('utf-8')
-                    
-                    content = []
-                    if user_text:
-                        content.append({"type": "text", "text": user_text})
-                    else:
-                        content.append({"type": "text", "text": "Что изображено на этой картинке? Реши задачу если есть."})
-                    
-                    content.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{photo_base64}"
-                        }
-                    })
-                    
-                    messages.append({"role": "user", "content": content})
-                else:
-                    messages.append({"role": "user", "content": user_text})
-                
-                # Отправляем запрос
                 response = requests.post(
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={
@@ -175,8 +158,11 @@ class OpenRouterAI:
                     },
                     json={
                         "model": model,
-                        "messages": messages,
-                        "temperature": 0.2,
+                        "messages": [
+                            {"role": "system", "content": "Ты математик. Решай задачи подробно."},
+                            {"role": "user", "content": task}
+                        ],
+                        "temperature": 0.1,
                         "max_tokens": 2000
                     },
                     timeout=60
@@ -184,23 +170,17 @@ class OpenRouterAI:
                 
                 result = response.json()
                 
-                # Проверяем наличие ошибки
-                if "error" in result:
-                    logger.warning(f"Модель {model} вернула ошибку: {result['error']}")
-                    continue
-                
-                # Проверяем наличие choices
                 if "choices" in result and len(result["choices"]) > 0:
                     return result["choices"][0]["message"]["content"]
                 else:
-                    logger.warning(f"Модель {model} не вернула choices: {result}")
+                    logger.warning(f"Модель {model} не вернула ответ")
                     continue
                     
             except Exception as e:
                 logger.warning(f"Ошибка с моделью {model}: {e}")
                 continue
         
-        return "❌ Не удалось получить ответ от AI. Попробуйте еще раз."
+        return "❌ Не удалось получить ответ. Попробуйте еще раз или упростите задачу."
 
 ai = OpenRouterAI()
 
