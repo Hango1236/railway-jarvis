@@ -41,6 +41,7 @@ class PCBridge:
         self.api_key = api_key
         self.pc_online = False
         self.last_check = 0
+        logger.info(f"🔧 PCBridge инициализирован с URL: {api_url}")
     
     def check_status(self):
         """Проверяет включен ли ПК (кеширует на 30 секунд) с заголовками для ngrok"""
@@ -55,16 +56,27 @@ class PCBridge:
                 "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"
             }
             
-            response = requests.get(f"{self.api_url}/ping", timeout=3, headers=headers)
+            logger.info(f"🔄 Проверяю статус ПК по URL: {self.api_url}/ping")
+            response = requests.get(f"{self.api_url}/ping", timeout=5, headers=headers)
+            
+            logger.info(f"📡 Ответ от ПК: статус {response.status_code}")
             self.pc_online = response.status_code == 200
+            
             if self.pc_online:
                 data = response.json()
                 logger.info(f"✅ ПК в сети ({data.get('time', 'unknown')})")
             else:
                 logger.info("❌ ПК не в сети")
+                
+        except requests.exceptions.ConnectionError:
+            self.pc_online = False
+            logger.error("❌ Ошибка соединения: ПК не доступен (ngrok не работает?)")
+        except requests.exceptions.Timeout:
+            self.pc_online = False
+            logger.error("❌ Таймаут: ПК не отвечает")
         except Exception as e:
             self.pc_online = False
-            logger.info(f"❌ ПК не отвечает: {e}")
+            logger.error(f"❌ Неизвестная ошибка при проверке ПК: {e}")
         
         self.last_check = now
         return self.pc_online
@@ -81,6 +93,7 @@ class PCBridge:
                 "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"
             }
             
+            logger.info("📸 Запрашиваю скриншот с ПК")
             response = requests.post(
                 f"{self.api_url}/screenshot",
                 headers=headers,
@@ -91,37 +104,13 @@ class PCBridge:
                 data = response.json()
                 if data.get("success"):
                     image_data = base64.b64decode(data["image"])
+                    logger.info(f"✅ Скриншот получен: {data.get('filename', 'unknown')}")
                     return BytesIO(image_data), data.get("filename", "screenshot.png")
+            logger.error(f"❌ Ошибка получения скриншота: {response.status_code}")
             return None, "❌ Не удалось получить скриншот"
         except Exception as e:
+            logger.error(f"❌ Ошибка при получении скриншота: {e}")
             return None, f"❌ Ошибка: {str(e)[:100]}"
-    
-    def execute_command(self, text):
-        """Отправляет команду на ПК для выполнения через твоего AI"""
-        if not self.check_status():
-            return "❌ Компьютер выключен. Чтобы выполнить эту команду, включи ПК."
-        
-        try:
-            headers = {
-                "X-API-Key": self.api_key,
-                "ngrok-skip-browser-warning": "true",
-                "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"
-            }
-            
-            response = requests.post(
-                f"{self.api_url}/command",
-                headers=headers,
-                json={"text": text},
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("success"):
-                    return data.get("speech", "Команда выполнена")
-            return "❌ Ошибка выполнения на ПК"
-        except Exception as e:
-            return f"❌ Ошибка связи с ПК: {str(e)[:100]}"
     
     def get_pc_status(self):
         """Получает полный статус ПК"""
@@ -138,6 +127,7 @@ class PCBridge:
                 "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"
             }
             
+            logger.info("📊 Запрашиваю статус ПК")
             response = requests.get(
                 f"{self.api_url}/status",
                 headers=headers,
@@ -145,13 +135,31 @@ class PCBridge:
             )
             
             if response.status_code == 200:
-                return response.json()
+                data = response.json()
+                logger.info(f"✅ Статус получен: время {data.get('time', 'unknown')}")
+                return data
+            logger.error(f"❌ Ошибка получения статуса: {response.status_code}")
             return {"online": True, "message": "ПК в сети, но статус недоступен"}
-        except:
-            return {"online": True, "message": "ПК в сети, но не отвечает"}
+        except Exception as e:
+            logger.error(f"❌ Ошибка при получении статуса: {e}")
+            return {"online": True, "message": f"ПК в сети, но ошибка: {str(e)[:50]}"}
 
-# Создаем экземпляр PC Bridge
-pc_bridge = PCBridge(PC_API_URL, PC_API_KEY) if PC_API_URL else None
+# Создаем экземпляр PC Bridge с диагностикой
+logger.info("="*50)
+logger.info("🔧 ИНИЦИАЛИЗАЦИЯ PCBridge")
+logger.info(f"📦 PC_API_URL = '{PC_API_URL}'")
+logger.info(f"📦 PC_API_KEY = {'✅ установлен' if PC_API_KEY else '❌ не установлен'}")
+
+if PC_API_URL and PC_API_KEY:
+    try:
+        pc_bridge = PCBridge(PC_API_URL, PC_API_KEY)
+        logger.info("✅ PCBridge успешно создан")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при создании PCBridge: {e}")
+        pc_bridge = None
+else:
+    logger.warning("⚠️ PCBridge не создан: не хватает URL или ключа")
+    pc_bridge = None
 
 # ================= AI КЛАСС (OpenRouter) =================
 class OpenRouterAI:
@@ -164,62 +172,59 @@ class OpenRouterAI:
         else:
             logger.warning("⚠ OpenRouter API ключ не найден")
     
-   def generate(self, user_text):
-    """Генерация ответа - сначала проверяем команды ПК, потом идём в AI"""
-    
-    # ===== СУПЕР-ДИАГНОСТИКА =====
-    logger.info("="*50)
-    logger.info("🔍 ДИАГНОСТИКА PCBridge:")
-    logger.info(f"📦 pc_bridge объект существует: {pc_bridge is not None}")
-    if pc_bridge:
-        logger.info(f"🔗 PC_API_URL: {pc_bridge.api_url}")
-        logger.info(f"🔑 PC_API_KEY: {'✅ есть' if pc_bridge.api_key else '❌ нет'}")
-        try:
-            online = pc_bridge.check_status()
-            logger.info(f"🖥️ ПК онлайн: {online}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка при check_status: {e}")
-    else:
-        logger.error("❌ pc_bridge = None! Проверь PC_API_URL и PC_API_KEY в переменных")
-    logger.info("="*50)
-    
-    # ===== 1. ПРЯМАЯ ОБРАБОТКА КОМАНД ПК (БЕЗ AI) =====
-    text_lower = user_text.lower()
-    
-    # Команда статус ПК
-    if any(word in text_lower for word in ["статус пк", "комп в сети", "пк онлайн", "что с пк"]):
-        logger.info("🖥️ Прямая команда: статус ПК")
+    def generate(self, user_text):
+        """Генерация ответа - сначала проверяем команды ПК, потом идём в AI"""
+        
+        # ===== СУПЕР-ДИАГНОСТИКА =====
+        logger.info("="*50)
+        logger.info("🔍 ДИАГНОСТИКА PCBridge:")
+        logger.info(f"📦 pc_bridge объект существует: {pc_bridge is not None}")
         if pc_bridge:
+            logger.info(f"🔗 PC_API_URL: {pc_bridge.api_url}")
+            logger.info(f"🔑 PC_API_KEY: {'✅ есть' if pc_bridge.api_key else '❌ нет'}")
             try:
-                if pc_bridge.check_status():
-                    # Получаем реальный статус с ПК
-                    status = pc_bridge.get_pc_status()
-                    if status.get("online"):
-                        return f"✅ Компьютер в сети!\n⏰ Время: {status.get('time', 'unknown')}\n📅 Дата: {status.get('date', 'unknown')}"
+                online = pc_bridge.check_status()
+                logger.info(f"🖥️ ПК онлайн: {online}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка при check_status: {e}")
+        else:
+            logger.error("❌ pc_bridge = None! Проверь PC_API_URL и PC_API_KEY в переменных")
+        logger.info("="*50)
+        
+        # ===== 1. ПРЯМАЯ ОБРАБОТКА КОМАНД ПК (БЕЗ AI) =====
+        text_lower = user_text.lower()
+        
+        # Команда статус ПК
+        if any(word in text_lower for word in ["статус пк", "комп в сети", "пк онлайн", "что с пк"]):
+            logger.info("🖥️ Прямая команда: статус ПК")
+            if pc_bridge:
+                try:
+                    if pc_bridge.check_status():
+                        # Получаем реальный статус с ПК
+                        status = pc_bridge.get_pc_status()
+                        if status.get("online"):
+                            return f"✅ Компьютер в сети!\n⏰ Время: {status.get('time', 'unknown')}\n📅 Дата: {status.get('date', 'unknown')}"
+                        else:
+                            return "💤 Компьютер выключен или в спящем режиме"
                     else:
                         return "💤 Компьютер выключен или в спящем режиме"
-                else:
-                    return "💤 Компьютер выключен или в спящем режиме"
-            except Exception as e:
-                logger.error(f"❌ Ошибка при запросе к ПК: {e}")
-                return f"❌ Ошибка связи с ПК: {str(e)[:100]}"
-        else:
-            logger.error("❌ pc_bridge = None в момент обработки команды!")
-            return "❌ ПК не настроен в боте (pc_bridge is None)"
-    
-    # Команда скриншот
-    if any(word in text_lower for word in ["скриншот", "снимок экрана", "что на экране"]):
-        logger.info("📸 Прямая команда: скриншот")
-        if pc_bridge:
-            if pc_bridge.check_status():
-                return "🔍 Делаю скриншот..."
+                except Exception as e:
+                    logger.error(f"❌ Ошибка при запросе к ПК: {e}")
+                    return f"❌ Ошибка связи с ПК: {str(e)[:100]}"
             else:
-                return "❌ Компьютер выключен. Включи его чтобы сделать скриншот."
-        else:
-            return "❌ ПК не настроен в боте"
-    
-    # ===== 2. ВСЁ ОСТАЛЬНОЕ ИДЁТ В AI =====
-    # ... остальной код AI (который у тебя уже есть)
+                logger.error("❌ pc_bridge = None в момент обработки команды!")
+                return "❌ ПК не настроен в боте (pc_bridge is None)"
+        
+        # Команда скриншот
+        if any(word in text_lower for word in ["скриншот", "снимок экрана", "что на экране"]):
+            logger.info("📸 Прямая команда: скриншот")
+            if pc_bridge:
+                if pc_bridge.check_status():
+                    return "🔍 Делаю скриншот..."
+                else:
+                    return "❌ Компьютер выключен. Включи его чтобы сделать скриншот."
+            else:
+                return "❌ ПК не настроен в боте"
         
         # ===== 2. ВСЁ ОСТАЛЬНОЕ ИДЁТ В AI =====
         if not self.available:
@@ -479,7 +484,6 @@ if __name__ == "__main__":
     logger.info("🚀 ЗАПУСК ДЖАРВИС БОТА")
     logger.info("="*60)
     logger.info("🤖 МОДЕЛЬ: Trinity 400B (400 МИЛЛИАРДОВ ПАРАМЕТРОВ!)")
-    logger.info("🔥 Это в 57 раз больше твоей старой 7B модели!")
     logger.info(f"✅ AI статус: {'доступен' if ai.available else 'недоступен'}")
     logger.info(f"🖥️  ПК: {'настроен' if pc_bridge else 'не настроен'}")
     if pc_bridge:
