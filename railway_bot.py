@@ -112,7 +112,12 @@ class OpenRouterAI:
 
     def generate_text(self, user_text):
         messages = [
-            {"role": "system", "content": "Ты полезный ассистент. Отвечай кратко и по делу на языке пользователя."},
+            {"role": "system", "content": (
+                "Ты полезный ассистент. Отвечай кратко и по делу на языке пользователя. "
+                "ВАЖНО: никогда не используй LaTeX ($, $$, \\frac, \\sqrt, \\boxed и т.д.) — "
+                "Telegram это не рендерит. Формулы пиши простым текстом: sqrt(5)/5, x^2, "
+                "используй Unicode-символы: ²³√±≤≥≠π."
+            )},
             {"role": "user", "content": user_text}
         ]
         for model in self.text_models:
@@ -128,7 +133,19 @@ class OpenRouterAI:
 
         prompt = caption if caption else "Что изображено на картинке? Опиши подробно."
 
+        system_prompt = (
+            "Ты полезный ассистент. Отвечай на языке пользователя. "
+            "ВАЖНО: никогда не используй LaTeX-разметку ($, $$, \\frac, \\sqrt, \\boxed и т.д.) — "
+            "Telegram её не поддерживает и пользователь увидит мусор. "
+            "Формулы пиши простым текстом: например 'sqrt(5)/5' вместо '\\frac{\\sqrt{5}}{5}', "
+            "'x^2' вместо '\\x^{2}'. Используй только обычный текст и Unicode-символы (²³√±≤≥≠)."
+        )
+
         messages = [
+            {
+                "role": "system",
+                "content": system_prompt
+            },
             {
                 "role": "user",
                 "content": [
