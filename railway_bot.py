@@ -1,12 +1,9 @@
 import os
 import requests
 import json
-import base64
 from flask import Flask, request
 import time
 import logging
-from io import BytesIO
-from datetime import datetime
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -18,169 +15,50 @@ app = Flask(__name__)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
-# ================= КОНФИГ ПК =================
-PC_API_URL = os.environ.get("PC_API_URL", "")
-PC_API_KEY = os.environ.get("PC_API_KEY", "")
-
-# ================= СИСТЕМНЫЙ ПРОМПТ =================
-SYSTEM_PROMPT = """Ты Джарвис — ИИ-ассистент в Telegram. Отвечай на русском языке.
-Ты отлично решаешь математические задачи. Объясняй решение подробно и понятно."""
-
-# ================= КЛАСС ДЛЯ РАБОТЫ С ПК =================
-class PCBridge:
-    def __init__(self, api_url, api_key):
-        self.api_url = api_url
-        self.api_key = api_key
-        self.pc_online = False
-        self.last_check = 0
-    
-    def check_status(self):
-        now = time.time()
-        if now - self.last_check < 30:
-            return self.pc_online
-        
-        try:
-            headers = {"ngrok-skip-browser-warning": "true"}
-            response = requests.get(f"{self.api_url}/ping", timeout=5, headers=headers)
-            self.pc_online = response.status_code == 200
-        except:
-            self.pc_online = False
-        
-        self.last_check = now
-        return self.pc_online
-    
-    def get_screenshot(self):
-        if not self.check_status():
-            return None, "❌ Компьютер выключен"
-        
-        try:
-            headers = {"X-API-Key": self.api_key, "ngrok-skip-browser-warning": "true"}
-            response = requests.post(f"{self.api_url}/screenshot", headers=headers, timeout=30)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("success"):
-                    image_data = base64.b64decode(data["image"])
-                    return BytesIO(image_data), data.get("filename", "screenshot.png")
-            return None, "❌ Не удалось получить скриншот"
-        except Exception as e:
-            return None, f"❌ Ошибка: {str(e)[:100]}"
-    
-    def get_pc_status(self):
-        if not self.check_status():
-            return {"online": False}
-        
-        try:
-            headers = {"X-API-Key": self.api_key}
-            response = requests.get(f"{self.api_url}/status", headers=headers, timeout=5)
-            if response.status_code == 200:
-                return response.json()
-            return {"online": True}
-        except:
-            return {"online": True}
-
-# Инициализация
-pc_bridge = PCBridge(PC_API_URL, PC_API_KEY) if PC_API_URL and PC_API_KEY else None
-
-# ================= ФУНКЦИЯ СКАЧИВАНИЯ ФОТО =================
-def download_photo(file_id):
-    """Скачивает фото из Telegram"""
-    try:
-        file_info = requests.get(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile",
-            params={"file_id": file_id}
-        ).json()
-        
-        if not file_info.get("ok"):
-            return None
-        
-        file_path = file_info["result"]["file_path"]
-        photo_data = requests.get(
-            f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-        ).content
-        
-        return photo_data
-    except Exception as e:
-        logger.error(f"Ошибка скачивания фото: {e}")
-        return None
-
 # ================= AI КЛАСС =================
 class OpenRouterAI:
     def __init__(self):
         self.api_key = OPENROUTER_API_KEY
         self.available = bool(self.api_key)
     
-    def generate(self, user_text, photo=None):
-        text_lower = user_text.lower() if user_text else ""
-        
-        # Команды ПК
-        if "статус пк" in text_lower or "комп в сети" in text_lower:
-            if pc_bridge:
-                if pc_bridge.check_status():
-                    status = pc_bridge.get_pc_status()
-                    return f"✅ Компьютер в сети!\nВремя: {status.get('time', 'unknown')}\nДата: {status.get('date', 'unknown')}"
-                return "💤 Компьютер выключен"
-            return "❌ ПК не настроен"
-        
-        if "скриншот" in text_lower or "снимок экрана" in text_lower:
-            if pc_bridge:
-                if pc_bridge.check_status():
-                    return "🔍 Делаю скриншот..."
-                return "❌ Компьютер выключен"
-            return "❌ ПК не настроен"
-        
-        # OpenRouter
+    def generate(self, user_text):
         if not self.available:
             return "❌ Нет API ключа"
         
-        # Определяем задачу
-        task = user_text if user_text else "Реши математическую задачу"
-        if photo:
-            task = f"{task} (на изображении математическое выражение)"
-        
-        # Пробуем разные текстовые модели (они стабильнее vision)
-        models = [
-            "deepseek/deepseek-chat:free",
-            "qwen/qwen-2.5-72b-instruct:free",
-            "google/gemma-3-12b-it:free",
-            "mistralai/mistral-small-24b-instruct-2501:free"
-        ]
-        
-        for model in models:
-            try:
-                logger.info(f"Пробую модель: {model}")
-                
-                response = requests.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": "Ты математик. Решай задачи подробно."},
-                            {"role": "user", "content": task}
-                        ],
-                        "temperature": 0.1,
-                        "max_tokens": 2000
-                    },
-                    timeout=60
-                )
-                
-                result = response.json()
-                
-                if "choices" in result and len(result["choices"]) > 0:
-                    return result["choices"][0]["message"]["content"]
-                else:
-                    logger.warning(f"Модель {model} не вернула ответ")
-                    continue
-                    
-            except Exception as e:
-                logger.warning(f"Ошибка с моделью {model}: {e}")
-                continue
-        
-        return "❌ Не удалось получить ответ. Попробуйте еще раз или упростите задачу."
+        try:
+            logger.info(f"Отправляю запрос к DeepSeek...")
+            
+            response = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "deepseek/deepseek-chat:free",
+                    "messages": [
+                        {"role": "system", "content": "Ты полезный ассистент. Отвечай кратко и по делу."},
+                        {"role": "user", "content": user_text}
+                    ],
+                    "temperature": 0.1,
+                    "max_tokens": 1000
+                },
+                timeout=30
+            )
+            
+            result = response.json()
+            logger.info(f"Ответ от API: {result}")
+            
+            if "choices" in result and len(result["choices"]) > 0:
+                return result["choices"][0]["message"]["content"]
+            elif "error" in result:
+                return f"❌ Ошибка API: {result['error'].get('message', 'Неизвестная ошибка')}"
+            else:
+                return f"❌ Странный ответ: {result}"
+            
+        except Exception as e:
+            logger.error(f"Ошибка: {e}")
+            return f"❌ Ошибка: {str(e)[:100]}"
 
 ai = OpenRouterAI()
 
@@ -193,15 +71,6 @@ def send_message(chat_id, text):
     except Exception as e:
         logger.error(f"Ошибка: {e}")
 
-def send_photo(chat_id, photo_io, caption):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-    files = {'photo': ('screenshot.png', photo_io, 'image/png')}
-    data = {"chat_id": chat_id, "caption": caption}
-    try:
-        requests.post(url, data=data, files=files, timeout=30)
-    except Exception as e:
-        send_message(chat_id, f"❌ Ошибка: {str(e)[:100]}")
-
 # ================= FLASK РОУТЫ =================
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -211,26 +80,11 @@ def webhook():
         if "message" in update:
             chat_id = update["message"]["chat"]["id"]
             text = update["message"].get("text", "")
-            photo = None
             
-            # Проверяем есть ли фото
-            if "photo" in update["message"]:
-                photo_file = update["message"]["photo"][-1]
-                photo = download_photo(photo_file["file_id"])
-                logger.info("📸 Получено фото")
-            
-            # Получаем ответ от AI
-            reply = ai.generate(text, photo)
-            
-            # Скриншот
-            if "🔍 Делаю скриншот" in reply and pc_bridge:
-                img_io, filename = pc_bridge.get_screenshot()
-                if img_io:
-                    send_photo(chat_id, img_io, f"📸 {filename}")
-                else:
-                    send_message(chat_id, filename)
-            else:
-                send_message(chat_id, reply)
+            logger.info(f"Сообщение: {text}")
+            reply = ai.generate(text)
+            logger.info(f"Ответ: {reply}")
+            send_message(chat_id, reply)
         
         return "OK", 200
     except Exception as e:
