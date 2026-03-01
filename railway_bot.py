@@ -169,35 +169,27 @@ class OpenRouterAI:
 
 ai = OpenRouterAI()
 
-# ================= TELEGRAM ФУНКЦИИ (ИСПРАВЛЕННЫЕ) =================
-def send_message(chat_id, text, reply_to_message_id=None):
-    """Отправка сообщения - ПРОСТОЙ РАБОЧИЙ ВАРИАНТ"""
+# ================= TELEGRAM ФУНКЦИИ (УЛЬТРА-ПРОСТЫЕ) =================
+def send_message(chat_id, text):
+    """Отправка сообщения - максимально просто"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     
-    # Самый простой способ - requests сам всё закодирует
+    # Простой JSON без лишних параметров
     data = {
         "chat_id": chat_id,
         "text": text
     }
     
-    # Добавляем reply только если нужно
-    if reply_to_message_id:
-        data["reply_to_message_id"] = reply_to_message_id
-    
     try:
-        # Просто передаём словарь - requests сам всё сделает правильно
+        # Отправляем как json - requests сам всё закодирует
         response = requests.post(url, json=data, timeout=5)
         if not response.ok:
-            logger.error(f"Ошибка Telegram: {response.text}")
-            # Если ошибка - пробуем без reply
-            if reply_to_message_id:
-                data.pop("reply_to_message_id", None)
-                requests.post(url, json=data, timeout=5)
+            logger.error(f"Ошибка: {response.text}")
     except Exception as e:
         logger.error(f"Ошибка отправки: {e}")
 
-def send_photo(chat_id, photo_io, caption, reply_to_message_id=None):
-    """Отправка фото - ПРОСТОЙ РАБОЧИЙ ВАРИАНТ"""
+def send_photo(chat_id, photo_io, caption):
+    """Отправка фото - максимально просто"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     
     files = {'photo': ('screenshot.png', photo_io, 'image/png')}
@@ -206,17 +198,14 @@ def send_photo(chat_id, photo_io, caption, reply_to_message_id=None):
         "caption": caption
     }
     
-    if reply_to_message_id:
-        data["reply_to_message_id"] = reply_to_message_id
-    
     try:
         response = requests.post(url, data=data, files=files, timeout=30)
         if not response.ok:
             logger.error(f"Ошибка фото: {response.text}")
-            send_message(chat_id, "❌ Не удалось отправить скриншот", reply_to_message_id)
+            send_message(chat_id, "❌ Не удалось отправить скриншот")
     except Exception as e:
         logger.error(f"Ошибка: {e}")
-        send_message(chat_id, f"❌ Ошибка: {str(e)[:100]}", reply_to_message_id)
+        send_message(chat_id, f"❌ Ошибка: {str(e)[:100]}")
 
 def send_action(chat_id, action):
     """Отправка статуса 'печатает'"""
@@ -251,7 +240,6 @@ def webhook():
         
         if "message" in update:
             chat_id = update["message"]["chat"]["id"]
-            message_id = update["message"]["message_id"]
             text = update["message"].get("text", "")
             
             logger.info(f"📨 Сообщение: {text[:50]}...")
@@ -267,11 +255,11 @@ def webhook():
                 send_action(chat_id, "upload_photo")
                 img_io, filename = pc_bridge.get_screenshot()
                 if img_io:
-                    send_photo(chat_id, img_io, f"📸 {filename}", message_id)
+                    send_photo(chat_id, img_io, f"📸 {filename}")
                 else:
-                    send_message(chat_id, filename, message_id)
+                    send_message(chat_id, filename)
             else:
-                send_message(chat_id, reply, message_id)
+                send_message(chat_id, reply)
         
         return "OK", 200
     except Exception as e:
