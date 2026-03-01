@@ -43,22 +43,28 @@ class PCBridge:
         self.last_check = 0
     
     def check_status(self):
-        """Проверяет включен ли ПК (кеширует на 30 секунд)"""
+        """Проверяет включен ли ПК (кеширует на 30 секунд) с заголовками для ngrok"""
         now = time.time()
         if now - self.last_check < 30:
             return self.pc_online
         
         try:
-            response = requests.get(f"{self.api_url}/ping", timeout=3)
+            # Добавляем заголовок для обхода предупреждения ngrok
+            headers = {
+                "ngrok-skip-browser-warning": "true",
+                "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"
+            }
+            
+            response = requests.get(f"{self.api_url}/ping", timeout=3, headers=headers)
             self.pc_online = response.status_code == 200
             if self.pc_online:
                 data = response.json()
                 logger.info(f"✅ ПК в сети ({data.get('time', 'unknown')})")
             else:
                 logger.info("❌ ПК не в сети")
-        except:
+        except Exception as e:
             self.pc_online = False
-            logger.info("❌ ПК не отвечает")
+            logger.info(f"❌ ПК не отвечает: {e}")
         
         self.last_check = now
         return self.pc_online
@@ -69,9 +75,15 @@ class PCBridge:
             return None, "❌ Компьютер выключен или не в сети"
         
         try:
+            headers = {
+                "X-API-Key": self.api_key,
+                "ngrok-skip-browser-warning": "true",
+                "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"
+            }
+            
             response = requests.post(
                 f"{self.api_url}/screenshot",
-                headers={"X-API-Key": self.api_key},
+                headers=headers,
                 timeout=30
             )
             
@@ -90,9 +102,15 @@ class PCBridge:
             return "❌ Компьютер выключен. Чтобы выполнить эту команду, включи ПК."
         
         try:
+            headers = {
+                "X-API-Key": self.api_key,
+                "ngrok-skip-browser-warning": "true",
+                "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"
+            }
+            
             response = requests.post(
                 f"{self.api_url}/command",
-                headers={"X-API-Key": self.api_key},
+                headers=headers,
                 json={"text": text},
                 timeout=30
             )
@@ -114,9 +132,15 @@ class PCBridge:
             }
         
         try:
+            headers = {
+                "X-API-Key": self.api_key,
+                "ngrok-skip-browser-warning": "true",
+                "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"
+            }
+            
             response = requests.get(
                 f"{self.api_url}/status",
-                headers={"X-API-Key": self.api_key},
+                headers=headers,
                 timeout=5
             )
             
