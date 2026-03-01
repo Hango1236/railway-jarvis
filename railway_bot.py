@@ -24,12 +24,7 @@ PC_API_KEY = os.environ.get("PC_API_KEY", "")
 
 # ================= СИСТЕМНЫЙ ПРОМПТ =================
 SYSTEM_PROMPT = """Ты Джарвис — ИИ-ассистент в Telegram. Отвечай на русском языке.
-
-ПРАВИЛА:
-1. Если просят код или скрипт — генерируй ПОЛНЫЙ рабочий код
-2. Для Roblox используй Luau (Lua)
-3. Не пиши "сейчас", "начинаю", "хорошо" — сразу давай результат
-4. Код должен быть с комментариями на русском"""
+Ты умеешь анализировать изображения. Если тебе прислали картинку с задачей - реши её."""
 
 # ================= КЛАСС ДЛЯ РАБОТЫ С ПК =================
 class PCBridge:
@@ -87,14 +82,39 @@ class PCBridge:
 # Инициализация
 pc_bridge = PCBridge(PC_API_URL, PC_API_KEY) if PC_API_URL and PC_API_KEY else None
 
+# ================= ФУНКЦИЯ СКАЧИВАНИЯ ФОТО =================
+def download_photo(file_id):
+    """Скачивает фото из Telegram"""
+    try:
+        # Получаем информацию о файле
+        file_info = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile",
+            params={"file_id": file_id}
+        ).json()
+        
+        if not file_info.get("ok"):
+            return None
+        
+        file_path = file_info["result"]["file_path"]
+        
+        # Скачиваем файл
+        photo_data = requests.get(
+            f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+        ).content
+        
+        return photo_data
+    except Exception as e:
+        logger.error(f"Ошибка скачивания фото: {e}")
+        return None
+
 # ================= AI КЛАСС =================
 class OpenRouterAI:
     def __init__(self):
         self.api_key = OPENROUTER_API_KEY
         self.available = bool(self.api_key)
     
-    def generate(self, user_text):
-        text_lower = user_text.lower()
+    def generate(self, user_text, photo=None):
+        text_lower = user_text.lower() if user_text else ""
         
         # Команды ПК
         if "статус пк" in text_lower or "комп в сети" in text_lower:
@@ -112,56 +132,84 @@ class OpenRouterAI:
                 return "❌ Компьютер выключен"
             return "❌ ПК не настроен"
         
-        # OpenRouter
+        # OpenRouter с поддержкой изображений
         if not self.available:
             return "❌ Нет API ключа"
         
         try:
+            # Формируем сообщение
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            
+            # Если есть фото - добавляем multimodal контент
+            if photo:
+                # Конвертируем фото в base64
+                photo_base64 = base64.b64encode(photo).decode('utf-8')
+                
+                # Создаём контент с текстом и изображением
+                content = []
+                
+                # Добавляем текст если есть
+                if user_text:
+                    content.append({"type": "text", "text": user_text})
+                else:
+                    content.append({"type": "text", "text": "Реши эту задачу"})
+                
+                # Добавляем изображение
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{photo_base64}"
+                    }
+                })
+                
+                messages.append({"role": "user", "content": content})
+                logger.info("📸 Запрос с изображением")
+            else:
+                # Только текст
+                messages.append({"role": "user", "content": user_text})
+            
+            # Отправляем запрос в OpenRouter
             response = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": "arcee-ai/trinity-large-preview:free",
-                    "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_text}]
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
                 },
-                timeout=30
+                json={
+                    "model": "qwen/qwen-2.5-vl-72b-instruct:free",  # Vision модель
+                    "messages": messages,
+                    "temperature": 0.2,
+                    "max_tokens": 2000
+                },
+                timeout=60
             )
-            return response.json()["choices"][0]["message"]["content"]
+            
+            result = response.json()
+            return result["choices"][0]["message"]["content"]
+            
         except Exception as e:
+            logger.error(f"❌ Ошибка: {e}")
             return f"❌ Ошибка: {str(e)[:100]}"
 
 ai = OpenRouterAI()
 
-# ================= TELEGRAM ФУНКЦИИ (САМЫЕ ПРОСТЫЕ) =================
+# ================= TELEGRAM ФУНКЦИИ =================
 def send_message(chat_id, text):
-    """Отправка сообщения - максимально простой способ"""
+    """Отправка сообщения"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    
-    # Самый простой способ - использовать params вместо json
-    params = {
-        "chat_id": chat_id,
-        "text": text
-    }
-    
+    params = {"chat_id": chat_id, "text": text}
     try:
-        # Используем params - requests сам закодирует URL
-        response = requests.get(url, params=params, timeout=5)
-        if not response.ok:
-            logger.error(f"Ошибка: {response.text}")
+        requests.get(url, params=params, timeout=5)
     except Exception as e:
         logger.error(f"Ошибка: {e}")
 
 def send_photo(chat_id, photo_io, caption):
     """Отправка фото"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-    
     files = {'photo': ('screenshot.png', photo_io, 'image/png')}
     data = {"chat_id": chat_id, "caption": caption}
-    
     try:
-        response = requests.post(url, data=data, files=files, timeout=30)
-        if not response.ok:
-            send_message(chat_id, "❌ Не удалось отправить скриншот")
+        requests.post(url, data=data, files=files, timeout=30)
     except Exception as e:
         send_message(chat_id, f"❌ Ошибка: {str(e)[:100]}")
 
@@ -174,9 +222,19 @@ def webhook():
         if "message" in update:
             chat_id = update["message"]["chat"]["id"]
             text = update["message"].get("text", "")
+            photo = None
             
-            reply = ai.generate(text)
+            # Проверяем есть ли фото
+            if "photo" in update["message"]:
+                # Берём фото в наилучшем качестве
+                photo_file = update["message"]["photo"][-1]
+                photo = download_photo(photo_file["file_id"])
+                logger.info(f"📸 Получено фото")
             
+            # Получаем ответ от AI
+            reply = ai.generate(text, photo)
+            
+            # Скриншот
             if "🔍 Делаю скриншот" in reply and pc_bridge:
                 img_io, filename = pc_bridge.get_screenshot()
                 if img_io:
@@ -197,7 +255,7 @@ def set_webhook():
     if not railway_url:
         railway_url = request.host
     webhook_url = f"https://{railway_url}/webhook"
-    response = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook", params={"url": webhook_url})
+    requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook", params={"url": webhook_url})
     return "Webhook установлен!"
 
 @app.route('/')
