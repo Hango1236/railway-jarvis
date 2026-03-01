@@ -54,7 +54,7 @@ class OpenRouterAI:
                     "X-Title": "Jarvis Telegram Bot"
                 },
                 json={
-                    "model": "qwen/qwen2.5-7b-instruct:free",  # ⭐ ТВОЯ РОДНАЯ МОДЕЛЬ!
+                    "model": "qwen/qwen-2.5-7b-instruct:free",  # ⭐ ПРАВИЛЬНЫЙ ID!
                     "messages": [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_text}
@@ -205,7 +205,7 @@ def status():
     return {
         "bot_running": True,
         "ai_available": ai.available,
-        "model": "qwen2.5-7b-instruct (твоя родная)",
+        "model": "qwen-2.5-7b-instruct (твоя родная!)",
         "telegram_token_set": bool(TELEGRAM_TOKEN),
         "openrouter_key_set": bool(OPENROUTER_API_KEY),
         "time": time.strftime("%Y-%m-%d %H:%M:%S")
