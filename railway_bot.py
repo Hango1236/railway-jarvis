@@ -164,16 +164,33 @@ class OpenRouterAI:
         else:
             logger.warning("⚠ OpenRouter API ключ не найден")
     
-    def generate(self, user_text):
-        """Генерация ответа - сначала проверяем команды ПК, потом идём в AI"""
-        
-        # ===== 1. ПРЯМАЯ ОБРАБОТКА КОМАНД ПК (БЕЗ AI) =====
-        text_lower = user_text.lower()
-        
-        # Команда статус ПК
-        if any(word in text_lower for word in ["статус пк", "комп в сети", "пк онлайн", "что с пк"]):
-            logger.info("🖥️ Прямая команда: статус ПК")
-            if pc_bridge:
+   def generate(self, user_text):
+    """Генерация ответа - сначала проверяем команды ПК, потом идём в AI"""
+    
+    # ===== СУПЕР-ДИАГНОСТИКА =====
+    logger.info("="*50)
+    logger.info("🔍 ДИАГНОСТИКА PCBridge:")
+    logger.info(f"📦 pc_bridge объект существует: {pc_bridge is not None}")
+    if pc_bridge:
+        logger.info(f"🔗 PC_API_URL: {pc_bridge.api_url}")
+        logger.info(f"🔑 PC_API_KEY: {'✅ есть' if pc_bridge.api_key else '❌ нет'}")
+        try:
+            online = pc_bridge.check_status()
+            logger.info(f"🖥️ ПК онлайн: {online}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при check_status: {e}")
+    else:
+        logger.error("❌ pc_bridge = None! Проверь PC_API_URL и PC_API_KEY в переменных")
+    logger.info("="*50)
+    
+    # ===== 1. ПРЯМАЯ ОБРАБОТКА КОМАНД ПК (БЕЗ AI) =====
+    text_lower = user_text.lower()
+    
+    # Команда статус ПК
+    if any(word in text_lower for word in ["статус пк", "комп в сети", "пк онлайн", "что с пк"]):
+        logger.info("🖥️ Прямая команда: статус ПК")
+        if pc_bridge:
+            try:
                 if pc_bridge.check_status():
                     # Получаем реальный статус с ПК
                     status = pc_bridge.get_pc_status()
@@ -183,19 +200,26 @@ class OpenRouterAI:
                         return "💤 Компьютер выключен или в спящем режиме"
                 else:
                     return "💤 Компьютер выключен или в спящем режиме"
+            except Exception as e:
+                logger.error(f"❌ Ошибка при запросе к ПК: {e}")
+                return f"❌ Ошибка связи с ПК: {str(e)[:100]}"
+        else:
+            logger.error("❌ pc_bridge = None в момент обработки команды!")
+            return "❌ ПК не настроен в боте (pc_bridge is None)"
+    
+    # Команда скриншот
+    if any(word in text_lower for word in ["скриншот", "снимок экрана", "что на экране"]):
+        logger.info("📸 Прямая команда: скриншот")
+        if pc_bridge:
+            if pc_bridge.check_status():
+                return "🔍 Делаю скриншот..."
             else:
-                return "❌ ПК не настроен в боте"
-        
-        # Команда скриншот
-        if any(word in text_lower for word in ["скриншот", "снимок экрана", "что на экране"]):
-            logger.info("📸 Прямая команда: скриншот")
-            if pc_bridge:
-                if pc_bridge.check_status():
-                    return "🔍 Делаю скриншот..."
-                else:
-                    return "❌ Компьютер выключен. Включи его чтобы сделать скриншот."
-            else:
-                return "❌ ПК не настроен в боте"
+                return "❌ Компьютер выключен. Включи его чтобы сделать скриншот."
+        else:
+            return "❌ ПК не настроен в боте"
+    
+    # ===== 2. ВСЁ ОСТАЛЬНОЕ ИДЁТ В AI =====
+    # ... остальной код AI (который у тебя уже есть)
         
         # ===== 2. ВСЁ ОСТАЛЬНОЕ ИДЁТ В AI =====
         if not self.available:
