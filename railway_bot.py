@@ -53,7 +53,7 @@ class OpenRouterAI:
                     "X-Title": "Jarvis Telegram Bot"
                 },
                 json={
-                    "model": "google/gemma-3-12b-it:free",
+                    "model": "qwen/qwen3-4b:free",  # ИСПРАВЛЕНО: новая версия Qwen
                     "messages": [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_text}
@@ -171,11 +171,15 @@ def webhook():
 
 @app.route('/setwebhook')
 def set_webhook():
-    """Установка вебхука (вызвать один раз после деплоя)"""
+    """Установка вебхука"""
+    # Берем домен из переменной или из запроса
     railway_url = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
     
     if not railway_url:
-        return "❌ RAILWAY_PUBLIC_DOMAIN не найден. Подожди пару минут после деплоя."
+        # Пробуем получить из request
+        railway_url = request.host
+        if railway_url.startswith('localhost'):
+            return "❌ Локальный сервер. Используй продакшн URL."
     
     webhook_url = f"https://{railway_url}/webhook"
     
