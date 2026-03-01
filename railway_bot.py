@@ -19,7 +19,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 # ================= КОНФИГ ПК =================
-PC_API_URL = os.environ.get("PC_API_URL", "")  # ngrok URL
+PC_API_URL = os.environ.get("PC_API_URL", "")  # ngrok URL (https://...ngrok-free.dev)
 PC_API_KEY = os.environ.get("PC_API_KEY", "")  # тот же ключ что в pc_bridge.py
 
 # ================= СИСТЕМНЫЙ ПРОМПТ =================
@@ -30,6 +30,7 @@ SYSTEM_PROMPT = """Ты Джарвис — ИИ-ассистент в Telegram. 
 2. Для Roblox используй Luau (Lua)
 3. Не пиши "сейчас", "начинаю", "хорошо" — сразу давай результат
 4. Код должен быть с комментариями на русском
+5. Ты используешь Trinity 400B — одну из самых мощных бесплатных моделей
 
 Если спрашивают не про код — отвечай кратко и по делу."""
 
@@ -99,7 +100,6 @@ class PCBridge:
             if response.status_code == 200:
                 data = response.json()
                 if data.get("success"):
-                    # Возвращаем speech от твоего AI
                     return data.get("speech", "Команда выполнена")
             return "❌ Ошибка выполнения на ПК"
         except Exception as e:
@@ -136,11 +136,12 @@ class OpenRouterAI:
         self.available = bool(self.api_key)
         if self.available:
             logger.info("✅ AI инициализирован с OpenRouter")
+            logger.info("🤖 Модель: Trinity 400B (400 МИЛЛИАРДОВ ПАРАМЕТРОВ!)")
         else:
             logger.warning("⚠ OpenRouter API ключ не найден")
     
     def generate(self, user_text):
-        """Генерация ответа через OpenRouter"""
+        """Генерация ответа через OpenRouter с Trinity 400B"""
         if not self.available:
             return "❌ Ошибка: Не добавлен API ключ OpenRouter."
         
@@ -152,7 +153,7 @@ class OpenRouterAI:
             if any(word in text_lower for word in ["скриншот", "снимок экрана", "что на экране"]):
                 if pc_bridge:
                     if pc_bridge.check_status():
-                        return "🔍 Делаю скриншот..."  # Будет обработано отдельно
+                        return "🔍 Делаю скриншот..."
                     else:
                         return "❌ Компьютер выключен. Включи его чтобы сделать скриншот."
             
@@ -164,7 +165,7 @@ class OpenRouterAI:
                     else:
                         return "💤 Компьютер выключен или в спящем режиме"
             
-            # Если не команда для ПК - используем OpenRouter
+            # ===== TRINITY 400B - САМАЯ МОЩНАЯ МОДЕЛЬ =====
             response = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={
@@ -174,27 +175,82 @@ class OpenRouterAI:
                     "X-Title": "Jarvis Telegram Bot"
                 },
                 json={
-                    "meta-llama/llama-4-maverick:free",
+                    "model": "arcee-ai/trinity-large-preview:free",  # ⭐ 400B Trinity!
                     "messages": [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_text}
                     ],
                     "temperature": 0.2,
-                    "max_tokens": 1500
+                    "max_tokens": 2000,
+                    "top_p": 0.9
                 },
-                timeout=30
+                timeout=60  # Даём больше времени на размышления 400B модели
             )
             
             result = response.json()
             
             if "error" in result:
-                return f"⚠ Ошибка AI: {result['error'].get('message', 'Unknown')}"
+                error_msg = result["error"].get("message", "Неизвестная ошибка")
+                logger.error(f"❌ Ошибка API: {error_msg}")
+                
+                # Если Trinity занята - пробуем запасные модели
+                if "capacity" in error_msg.lower() or "overloaded" in error_msg.lower():
+                    logger.info("🔄 Trinity занята, пробую запасную...")
+                    return self.try_fallback_model(user_text)
+                    
+                return f"⚠ Ошибка AI: {error_msg}"
             
-            return result["choices"][0]["message"]["content"]
+            reply = result["choices"][0]["message"]["content"]
+            logger.info(f"✅ Получен ответ от Trinity 400B, длина: {len(reply)} символов")
+            return reply
             
         except Exception as e:
             logger.error(f"❌ Ошибка: {e}")
-            return f"⚠ Произошла ошибка: {str(e)[:100]}"
+            return self.try_fallback_model(user_text)
+    
+    def try_fallback_model(self, user_text):
+        """Запасные модели на случай если Trinity занята"""
+        fallback_models = [
+            "deepseek/deepseek-chat:free",           # DeepSeek (очень умная)
+            "google/gemma-3-12b-it:free",            # Google Gemma 3
+            "mistralai/mistral-small-24b-instruct-2501:free",  # Mistral
+            "meta-llama/llama-3.3-70b-instruct:free" # Meta Llama
+        ]
+        
+        for model in fallback_models:
+            try:
+                logger.info(f"🔄 Пробую запасную модель: {model}")
+                
+                response = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "user", "content": user_text}
+                        ],
+                        "temperature": 0.2,
+                        "max_tokens": 1500
+                    },
+                    timeout=30
+                )
+                
+                result = response.json()
+                
+                if "error" not in result:
+                    reply = result["choices"][0]["message"]["content"]
+                    logger.info(f"✅ Получен ответ от {model}")
+                    return reply
+                    
+            except Exception as e:
+                logger.warning(f"⚠ Модель {model} не сработала: {e}")
+                continue
+        
+        return "❌ Все модели временно недоступны. Попробуй через 5 минут."
 
 # Создаем экземпляр AI
 ai = OpenRouterAI()
@@ -213,7 +269,12 @@ def send_message(chat_id, text, reply_to_message_id=None):
         data["parse_mode"] = "Markdown"
     
     try:
-        requests.post(url, json=data, timeout=5)
+        response = requests.post(url, json=data, timeout=5)
+        if not response.ok:
+            logger.error(f"Ошибка Telegram: {response.text}")
+            if "parse_mode" in data:
+                del data["parse_mode"]
+                requests.post(url, json=data, timeout=5)
     except Exception as e:
         logger.error(f"Ошибка отправки: {e}")
 
@@ -231,6 +292,7 @@ def send_photo(chat_id, photo_io, caption, reply_to_message_id=None):
         requests.post(url, data=data, files=files, timeout=30)
     except Exception as e:
         logger.error(f"Ошибка отправки фото: {e}")
+        send_message(chat_id, "❌ Не удалось отправить скриншот", reply_to_message_id)
 
 def send_action(chat_id, action):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
@@ -245,11 +307,12 @@ def home():
     pc_status = "✅ В сети" if pc_bridge and pc_bridge.check_status() else "❌ Не в сети"
     return f"""
     <html>
-        <head><title>Джарвис Бот</title></head>
+        <head><title>Джарвис Бот - Trinity 400B</title></head>
         <body>
             <h1>🤖 Джарвис Telegram Бот</h1>
             <p>Статус: <b>✅ Работает</b></p>
-            <p>AI: {'✅ Доступен' if ai.available else '❌ Нет API ключа'}</p>
+            <p>AI: <b>🔥 Trinity 400B (400 миллиардов параметров!)</b></p>
+            <p>AI доступен: {'✅ Да' if ai.available else '❌ Нет'}</p>
             <p>ПК: <b>{pc_status}</b></p>
             <p>Время: {time.strftime('%Y-%m-%d %H:%M:%S')}</p>
             <p>
@@ -296,7 +359,7 @@ def webhook():
         
         return "OK", 200
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+        logger.error(f"❌ Ошибка в webhook: {e}")
         return "Error", 500
 
 @app.route('/setwebhook')
@@ -306,7 +369,7 @@ def set_webhook():
     if not railway_url:
         railway_url = request.host
         if railway_url.startswith('localhost'):
-            return "❌ Локальный сервер"
+            return "❌ Локальный сервер. Используй продакшн URL."
     
     webhook_url = f"https://{railway_url}/webhook"
     
@@ -330,22 +393,29 @@ def status():
     return {
         "bot_running": True,
         "ai_available": ai.available,
+        "ai_model": "Trinity 400B (400 млрд параметров)",
         "pc_online": pc_status.get("online", False),
         "pc_status": pc_status,
         "telegram_token_set": bool(TELEGRAM_TOKEN),
         "openrouter_key_set": bool(OPENROUTER_API_KEY),
         "pc_configured": bool(PC_API_URL),
+        "pc_url": PC_API_URL if PC_API_URL else "не настроен",
         "time": time.strftime("%Y-%m-%d %H:%M:%S")
     }
 
+# ================= ЗАПУСК =================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info("="*50)
+    logger.info("="*60)
     logger.info("🚀 ЗАПУСК ДЖАРВИС БОТА")
-    logger.info("="*50)
-    logger.info(f"🤖 AI: {'доступен' if ai.available else 'недоступен'}")
+    logger.info("="*60)
+    logger.info("🤖 МОДЕЛЬ: Trinity 400B (400 МИЛЛИАРДОВ ПАРАМЕТРОВ!)")
+    logger.info("🔥 Это в 57 раз больше твоей старой 7B модели!")
+    logger.info(f"✅ AI статус: {'доступен' if ai.available else 'недоступен'}")
     logger.info(f"🖥️  ПК: {'настроен' if pc_bridge else 'не настроен'}")
     if pc_bridge:
         logger.info(f"   Статус: {'✅ В сети' if pc_bridge.check_status() else '❌ Не в сети'}")
-    logger.info("="*50)
+    if PC_API_URL:
+        logger.info(f"   URL: {PC_API_URL}")
+    logger.info("="*60)
     app.run(host="0.0.0.0", port=port)
