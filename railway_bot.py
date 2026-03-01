@@ -159,9 +159,13 @@ class OpenRouterAI:
             
             if any(word in text_lower for word in ["статус пк", "комп в сети", "пк онлайн"]):
                 if pc_bridge:
-                    status = pc_bridge.get_pc_status()
-                    if status.get("online"):
-                        return f"✅ Компьютер в сети!\n⏰ Время: {status.get('time', 'unknown')}\n📅 Дата: {status.get('date', 'unknown')}"
+                    if pc_bridge.check_status():
+                        # Получаем реальный статус с ПК
+                        status = pc_bridge.get_pc_status()
+                        if status.get("online"):
+                            return f"✅ Компьютер в сети!\n⏰ Время: {status.get('time', 'unknown')}\n📅 Дата: {status.get('date', 'unknown')}"
+                        else:
+                            return "💤 Компьютер выключен или в спящем режиме"
                     else:
                         return "💤 Компьютер выключен или в спящем режиме"
             
@@ -341,7 +345,9 @@ def webhook():
             # Получаем ответ от AI
             reply = ai.generate(text)
             
-            # Если AI сказал что делает скриншот
+            # ===== ОБРАБОТКА СПЕЦИАЛЬНЫХ КОМАНД =====
+            
+            # Скриншот
             if "🔍 Делаю скриншот" in reply and pc_bridge:
                 # Показываем что загружает фото
                 send_action(chat_id, "upload_photo")
@@ -353,8 +359,14 @@ def webhook():
                     send_photo(chat_id, img_io, f"📸 {filename}", message_id)
                 else:
                     send_message(chat_id, filename, message_id)
+            
+            # Статус ПК (эти фразы возвращает ai.generate)
+            elif any(status_word in reply for status_word in ["✅ Компьютер в сети", "💤 Компьютер выключен"]):
+                # Просто отправляем готовый ответ
+                send_message(chat_id, reply, message_id)
+            
+            # Обычный ответ
             else:
-                # Обычный ответ
                 send_message(chat_id, reply, message_id)
         
         return "OK", 200
