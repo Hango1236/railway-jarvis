@@ -33,7 +33,7 @@ class OpenRouterAI:
         self.available = bool(self.api_key)
         if self.available:
             logger.info("✅ AI инициализирован с OpenRouter")
-            logger.info("🤖 Модель: Qwen 2.5 7b (твоя любимая!)")
+            logger.info("🤖 Модель: Qwen3 235B (МОНСТР!)")
         else:
             logger.warning("⚠ OpenRouter API ключ не найден")
     
@@ -43,7 +43,7 @@ class OpenRouterAI:
             return "❌ Ошибка: Не добавлен API ключ OpenRouter.\n\nДобавь переменную OPENROUTER_API_KEY в настройках Railway."
         
         try:
-            logger.info(f"📤 Отправляю запрос к Qwen 2.5 7b...")
+            logger.info(f"📤 Отправляю запрос к Qwen3 235B...")
             
             response = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
@@ -54,16 +54,16 @@ class OpenRouterAI:
                     "X-Title": "Jarvis Telegram Bot"
                 },
                 json={
-                    "model": "qwen/qwen-2.5-7b-instruct:free",  # ⭐ ПРАВИЛЬНЫЙ ID!
+                    "model": "qwen/qwen3-235b-a22b-thinking:free",  # ⭐ ТВОЯ НОВАЯ МОДЕЛЬ 235B!
                     "messages": [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_text}
                     ],
                     "temperature": 0.2,
-                    "max_tokens": 1500,
+                    "max_tokens": 2000,  # Больше токенов для длинных скриптов
                     "top_p": 0.9
                 },
-                timeout=45
+                timeout=60  # Даём больше времени на размышления
             )
             
             result = response.json()
@@ -71,10 +71,16 @@ class OpenRouterAI:
             if "error" in result:
                 error_msg = result["error"].get("message", "Неизвестная ошибка")
                 logger.error(f"❌ Ошибка API: {error_msg}")
+                
+                # Если ошибка что модель не найдена - пробуем другую
+                if "model" in error_msg.lower():
+                    logger.info("🔄 Пробуем запасную модель...")
+                    return self.generate_fallback(user_text)
+                    
                 return f"⚠ Ошибка AI: {error_msg}"
             
             reply = result["choices"][0]["message"]["content"]
-            logger.info(f"✅ Получен ответ от Qwen, длина: {len(reply)} символов")
+            logger.info(f"✅ Получен ответ от Qwen3 235B, длина: {len(reply)} символов")
             return reply
             
         except requests.exceptions.Timeout:
@@ -83,6 +89,31 @@ class OpenRouterAI:
         except Exception as e:
             logger.error(f"❌ Ошибка: {e}")
             return f"⚠ Произошла ошибка: {str(e)[:100]}"
+    
+    def generate_fallback(self, user_text):
+        """Запасная модель на случай если основная не работает"""
+        try:
+            response = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "qwen/qwen-2.5-72b-instruct:free",  # Запасная 72B
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_text}
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": 1500
+                },
+                timeout=45
+            )
+            result = response.json()
+            return result["choices"][0]["message"]["content"]
+        except:
+            return "⚠ Не удалось получить ответ ни от одной модели. Попробуй позже."
 
 # Создаем экземпляр AI
 ai = OpenRouterAI()
@@ -133,7 +164,7 @@ def home():
         <body>
             <h1>🤖 Джарвис Telegram Бот</h1>
             <p>Статус: <b>✅ Работает</b></p>
-            <p>AI: {'✅ Qwen 2.5 7b' if ai.available else '❌ Нет API ключа'}</p>
+            <p>AI: {'✅ Qwen3 235B (МОНСТР!)' if ai.available else '❌ Нет API ключа'}</p>
             <p>Время: {time.strftime('%Y-%m-%d %H:%M:%S')}</p>
             <p>
                 <a href="/setwebhook">🔗 Установить вебхук</a><br>
@@ -205,7 +236,7 @@ def status():
     return {
         "bot_running": True,
         "ai_available": ai.available,
-        "model": "qwen-2.5-7b-instruct (твоя родная!)",
+        "model": "qwen3-235b-a22b-thinking (235B МОНСТР!)",
         "telegram_token_set": bool(TELEGRAM_TOKEN),
         "openrouter_key_set": bool(OPENROUTER_API_KEY),
         "time": time.strftime("%Y-%m-%d %H:%M:%S")
@@ -214,11 +245,12 @@ def status():
 # ================= ЗАПУСК =================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info("="*50)
+    logger.info("="*60)
     logger.info("🚀 ЗАПУСК ДЖАРВИС БОТА")
-    logger.info("="*50)
-    logger.info(f"🤖 Модель: Qwen 2.5 7b (твоя любимая!)")
+    logger.info("="*60)
+    logger.info("🤖 МОДЕЛЬ: Qwen3 235B (235 МИЛЛИАРДОВ ПАРАМЕТРОВ!)")
+    logger.info("🔥 Это в 30 раз больше чем твоя старая 7B модель!")
     logger.info(f"✅ AI статус: {'доступен' if ai.available else 'недоступен'}")
     logger.info(f"🌐 Порт: {port}")
-    logger.info("="*50)
+    logger.info("="*60)
     app.run(host="0.0.0.0", port=port)
