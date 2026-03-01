@@ -141,35 +141,44 @@ class OpenRouterAI:
             logger.warning("⚠ OpenRouter API ключ не найден")
     
     def generate(self, user_text):
-        """Генерация ответа через OpenRouter с Trinity 400B"""
+        """Генерация ответа - сначала проверяем команды ПК, потом идём в AI"""
+        
+        # ===== 1. ПРЯМАЯ ОБРАБОТКА КОМАНД ПК (БЕЗ AI) =====
+        text_lower = user_text.lower()
+        
+        # Команда статус ПК
+        if any(word in text_lower for word in ["статус пк", "комп в сети", "пк онлайн", "что с пк"]):
+            logger.info("🖥️ Прямая команда: статус ПК")
+            if pc_bridge:
+                if pc_bridge.check_status():
+                    # Получаем реальный статус с ПК
+                    status = pc_bridge.get_pc_status()
+                    if status.get("online"):
+                        return f"✅ Компьютер в сети!\n⏰ Время: {status.get('time', 'unknown')}\n📅 Дата: {status.get('date', 'unknown')}"
+                    else:
+                        return "💤 Компьютер выключен или в спящем режиме"
+                else:
+                    return "💤 Компьютер выключен или в спящем режиме"
+            else:
+                return "❌ ПК не настроен в боте"
+        
+        # Команда скриншот
+        if any(word in text_lower for word in ["скриншот", "снимок экрана", "что на экране"]):
+            logger.info("📸 Прямая команда: скриншот")
+            if pc_bridge:
+                if pc_bridge.check_status():
+                    return "🔍 Делаю скриншот..."
+                else:
+                    return "❌ Компьютер выключен. Включи его чтобы сделать скриншот."
+            else:
+                return "❌ ПК не настроен в боте"
+        
+        # ===== 2. ВСЁ ОСТАЛЬНОЕ ИДЁТ В AI =====
         if not self.available:
             return "❌ Ошибка: Не добавлен API ключ OpenRouter."
         
         try:
-            # Проверяем, может это команда для ПК?
-            text_lower = user_text.lower()
-            
-            # Команды для ПК
-            if any(word in text_lower for word in ["скриншот", "снимок экрана", "что на экране"]):
-                if pc_bridge:
-                    if pc_bridge.check_status():
-                        return "🔍 Делаю скриншот..."
-                    else:
-                        return "❌ Компьютер выключен. Включи его чтобы сделать скриншот."
-            
-            if any(word in text_lower for word in ["статус пк", "комп в сети", "пк онлайн"]):
-                if pc_bridge:
-                    if pc_bridge.check_status():
-                        # Получаем реальный статус с ПК
-                        status = pc_bridge.get_pc_status()
-                        if status.get("online"):
-                            return f"✅ Компьютер в сети!\n⏰ Время: {status.get('time', 'unknown')}\n📅 Дата: {status.get('date', 'unknown')}"
-                        else:
-                            return "💤 Компьютер выключен или в спящем режиме"
-                    else:
-                        return "💤 Компьютер выключен или в спящем режиме"
-            
-            # ===== TRINITY 400B - САМАЯ МОЩНАЯ МОДЕЛЬ =====
+            # Отправляем запрос в OpenRouter
             response = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={
@@ -188,7 +197,7 @@ class OpenRouterAI:
                     "max_tokens": 2000,
                     "top_p": 0.9
                 },
-                timeout=60  # Даём больше времени на размышления 400B модели
+                timeout=60
             )
             
             result = response.json()
@@ -342,7 +351,7 @@ def webhook():
             # Показываем что печатает
             send_action(chat_id, "typing")
             
-            # Получаем ответ от AI
+            # Получаем ответ от AI (он уже обработал команды ПК)
             reply = ai.generate(text)
             
             # ===== ОБРАБОТКА СПЕЦИАЛЬНЫХ КОМАНД =====
@@ -360,8 +369,8 @@ def webhook():
                 else:
                     send_message(chat_id, filename, message_id)
             
-            # Статус ПК (эти фразы возвращает ai.generate)
-            elif any(status_word in reply for status_word in ["✅ Компьютер в сети", "💤 Компьютер выключен"]):
+            # Статус ПК (эти фразы возвращаются из прямой обработки)
+            elif any(status_word in reply for status_word in ["✅ Компьютер в сети", "💤 Компьютер выключен", "❌ ПК не настроен"]):
                 # Просто отправляем готовый ответ
                 send_message(chat_id, reply, message_id)
             
