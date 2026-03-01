@@ -33,7 +33,7 @@ class OpenRouterAI:
         self.available = bool(self.api_key)
         if self.available:
             logger.info("✅ AI инициализирован с OpenRouter")
-            logger.info("🤖 Модель: Qwen3 235B (МОНСТР!)")
+            logger.info("🤖 Модель: Trinity Large (400B параметров!)")
         else:
             logger.warning("⚠ OpenRouter API ключ не найден")
     
@@ -43,7 +43,7 @@ class OpenRouterAI:
             return "❌ Ошибка: Не добавлен API ключ OpenRouter.\n\nДобавь переменную OPENROUTER_API_KEY в настройках Railway."
         
         try:
-            logger.info(f"📤 Отправляю запрос к Qwen3 235B...")
+            logger.info(f"📤 Отправляю запрос к Trinity 400B...")
             
             response = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
@@ -54,16 +54,16 @@ class OpenRouterAI:
                     "X-Title": "Jarvis Telegram Bot"
                 },
                 json={
-                    "model": "qwen/qwen3-235b-a22b-thinking:free",  # ⭐ ТВОЯ НОВАЯ МОДЕЛЬ 235B!
+                    "model": "arcee-ai/trinity-large-preview:free",  # ⭐ ТО ЧТО УЖЕ РАБОТАЛО!
                     "messages": [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_text}
                     ],
                     "temperature": 0.2,
-                    "max_tokens": 2000,  # Больше токенов для длинных скриптов
+                    "max_tokens": 2000,
                     "top_p": 0.9
                 },
-                timeout=60  # Даём больше времени на размышления
+                timeout=60
             )
             
             result = response.json()
@@ -72,15 +72,15 @@ class OpenRouterAI:
                 error_msg = result["error"].get("message", "Неизвестная ошибка")
                 logger.error(f"❌ Ошибка API: {error_msg}")
                 
-                # Если ошибка что модель не найдена - пробуем другую
-                if "model" in error_msg.lower():
-                    logger.info("🔄 Пробуем запасную модель...")
-                    return self.generate_fallback(user_text)
+                # Если Trinity занята - пробуем Nemotron
+                if "capacity" in error_msg.lower() or "overloaded" in error_msg.lower():
+                    logger.info("🔄 Trinity занята, пробую Nemotron...")
+                    return self.try_nemotron(user_text)
                     
                 return f"⚠ Ошибка AI: {error_msg}"
             
             reply = result["choices"][0]["message"]["content"]
-            logger.info(f"✅ Получен ответ от Qwen3 235B, длина: {len(reply)} символов")
+            logger.info(f"✅ Получен ответ от Trinity, длина: {len(reply)} символов")
             return reply
             
         except requests.exceptions.Timeout:
@@ -90,8 +90,8 @@ class OpenRouterAI:
             logger.error(f"❌ Ошибка: {e}")
             return f"⚠ Произошла ошибка: {str(e)[:100]}"
     
-    def generate_fallback(self, user_text):
-        """Запасная модель на случай если основная не работает"""
+    def try_nemotron(self, user_text):
+        """Запасная модель - Nemotron (тоже работала у тебя)"""
         try:
             response = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
@@ -100,7 +100,7 @@ class OpenRouterAI:
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "qwen/qwen-2.5-72b-instruct:free",  # Запасная 72B
+                    "model": "nvidia/nemotron-nano-12b-2-5-vl:free",  # ⭐ Nemotron
                     "messages": [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_text}
@@ -111,9 +111,12 @@ class OpenRouterAI:
                 timeout=45
             )
             result = response.json()
-            return result["choices"][0]["message"]["content"]
-        except:
-            return "⚠ Не удалось получить ответ ни от одной модели. Попробуй позже."
+            reply = result["choices"][0]["message"]["content"]
+            logger.info(f"✅ Получен ответ от Nemotron")
+            return reply
+        except Exception as e:
+            logger.error(f"❌ Nemotron тоже не сработал: {e}")
+            return "❌ Все модели временно недоступны. Попробуй через 5 минут."
 
 # Создаем экземпляр AI
 ai = OpenRouterAI()
@@ -140,7 +143,6 @@ def send_message(chat_id, text):
         response = requests.post(url, json=data, timeout=5)
         if not response.ok:
             logger.error(f"Ошибка Telegram: {response.text}")
-            # Пробуем без Markdown
             if "parse_mode" in data:
                 del data["parse_mode"]
                 requests.post(url, json=data, timeout=5)
@@ -148,7 +150,7 @@ def send_message(chat_id, text):
         logger.error(f"Ошибка отправки: {e}")
 
 def send_action(chat_id, action):
-    """Отправка статуса 'печатает' и т.д."""
+    """Отправка статуса 'печатает'"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
     try:
         requests.post(url, json={"chat_id": chat_id, "action": action}, timeout=2)
@@ -164,7 +166,7 @@ def home():
         <body>
             <h1>🤖 Джарвис Telegram Бот</h1>
             <p>Статус: <b>✅ Работает</b></p>
-            <p>AI: {'✅ Qwen3 235B (МОНСТР!)' if ai.available else '❌ Нет API ключа'}</p>
+            <p>AI: {'✅ Trinity 400B' if ai.available else '❌ Нет API ключа'}</p>
             <p>Время: {time.strftime('%Y-%m-%d %H:%M:%S')}</p>
             <p>
                 <a href="/setwebhook">🔗 Установить вебхук</a><br>
@@ -176,43 +178,29 @@ def home():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Основной обработчик сообщений от Telegram"""
     try:
         update = request.get_json()
-        
         if "message" in update:
             chat_id = update["message"]["chat"]["id"]
             text = update["message"]["text"]
             
-            logger.info(f"📨 Сообщение от {chat_id}: {text[:50]}...")
-            
-            # Показываем что печатает
             send_action(chat_id, "typing")
-            
-            # Получаем ответ от AI
             reply = ai.generate(text)
-            
-            # Отправляем ответ
             send_message(chat_id, reply)
-            
-            logger.info(f"✅ Ответ отправлен")
         
         return "OK", 200
     except Exception as e:
-        logger.error(f"❌ Ошибка в webhook: {e}")
+        logger.error(f"❌ Ошибка: {e}")
         return "Error", 500
 
 @app.route('/setwebhook')
 def set_webhook():
-    """Установка вебхука"""
-    # Берем домен из переменной или из запроса
     railway_url = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
     
     if not railway_url:
-        # Пробуем получить из request
         railway_url = request.host
         if railway_url.startswith('localhost'):
-            return "❌ Локальный сервер. Используй продакшн URL."
+            return "❌ Локальный сервер"
     
     webhook_url = f"https://{railway_url}/webhook"
     
@@ -232,25 +220,22 @@ def set_webhook():
 
 @app.route('/status')
 def status():
-    """Проверка статуса"""
     return {
         "bot_running": True,
         "ai_available": ai.available,
-        "model": "qwen3-235b-a22b-thinking (235B МОНСТР!)",
+        "model": "Trinity Large 400B",
         "telegram_token_set": bool(TELEGRAM_TOKEN),
         "openrouter_key_set": bool(OPENROUTER_API_KEY),
         "time": time.strftime("%Y-%m-%d %H:%M:%S")
     }
 
-# ================= ЗАПУСК =================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info("="*60)
     logger.info("🚀 ЗАПУСК ДЖАРВИС БОТА")
     logger.info("="*60)
-    logger.info("🤖 МОДЕЛЬ: Qwen3 235B (235 МИЛЛИАРДОВ ПАРАМЕТРОВ!)")
-    logger.info("🔥 Это в 30 раз больше чем твоя старая 7B модель!")
+    logger.info("🤖 МОДЕЛЬ: Trinity Large 400B (400 МИЛЛИАРДОВ ПАРАМЕТРОВ!)")
+    logger.info("🔥 Это в 57 раз больше твоей старой 7B модели!")
     logger.info(f"✅ AI статус: {'доступен' if ai.available else 'недоступен'}")
-    logger.info(f"🌐 Порт: {port}")
     logger.info("="*60)
     app.run(host="0.0.0.0", port=port)
