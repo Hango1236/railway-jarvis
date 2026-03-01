@@ -53,7 +53,7 @@ class OpenRouterAI:
                     "X-Title": "Jarvis Telegram Bot"
                 },
                 json={
-                    "model": "deepseek/deepseek-chat:free",  # ИСПРАВЛЕНО: новая версия Qwen
+                    "model": "openrouter/free",  # ИСПРАВЛЕНО: новая версия Qwen
                     "messages": [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_text}
