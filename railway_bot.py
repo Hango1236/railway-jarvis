@@ -5,23 +5,31 @@ import logging
 import threading
 import time
 from flask import Flask, request
+import google.generativeai as genai
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# ================= КОНФИГУРАЦИЯ =================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 if not TELEGRAM_TOKEN:
     logger.error("❌ TELEGRAM_TOKEN не задан!")
 if not OPENROUTER_API_KEY:
     logger.error("❌ OPENROUTER_API_KEY не задан!")
+if not GEMINI_API_KEY:
+    logger.error("❌ GEMINI_API_KEY не задан!")
+else:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 chat_histories = {}
 MAX_HISTORY = 10
 
+# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
 def get_file_url(file_id):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile"
@@ -34,11 +42,11 @@ def get_file_url(file_id):
         logger.error(f"Ошибка getFile: {e}")
     return None
 
-def download_image(file_url):
+def download_image_bytes(file_url):
     try:
         response = requests.get(file_url, timeout=30)
         if response.status_code == 200:
-            return base64.b64encode(response.content).decode("utf-8")
+            return response.content
     except Exception as e:
         logger.error(f"Ошибка скачивания: {e}")
     return None
@@ -68,7 +76,45 @@ def send_typing(chat_id):
     except:
         pass
 
+# ================= AI ФУНКЦИИ =================
+def call_gemini_vision(image_bytes, prompt):
+    """Анализ изображения через Gemini"""
+    try:
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        image_part = {
+            "mime_type": "image/jpeg",
+            "data": image_bytes
+        }
+        response = model.generate_content([image_part, prompt])
+        if response and response.text:
+            return response.text.strip()
+    except Exception as e:
+        logger.error(f"Ошибка Gemini vision: {e}")
+    return None
+
+def call_gemini_text(messages_history, text):
+    """Текстовый запрос через Gemini"""
+    try:
+        model = genai.GenerativeModel(
+            model_name="gemini-2.0-flash",
+            system_instruction="Ты полезный ассистент. Отвечай кратко и по делу на русском языке."
+        )
+        # Конвертируем историю в формат Gemini
+        history = []
+        for msg in messages_history:
+            role = "user" if msg["role"] == "user" else "model"
+            history.append({"role": role, "parts": [msg["content"]]})
+
+        chat = model.start_chat(history=history)
+        response = chat.send_message(text)
+        if response and response.text:
+            return response.text.strip()
+    except Exception as e:
+        logger.error(f"Ошибка Gemini text: {e}")
+    return None
+
 def call_openrouter(messages, model):
+    """Fallback через OpenRouter"""
     if not OPENROUTER_API_KEY:
         return None
 
@@ -91,24 +137,18 @@ def call_openrouter(messages, model):
             "https://openrouter.ai/api/v1/chat/completions",
             headers=headers,
             json=payload,
-            timeout=90
+            timeout=60
         )
-
-        logger.info(f"Модель {model}: статус {response.status_code}")
-
         if response.status_code == 200:
             data = response.json()
             if "choices" in data and data["choices"]:
                 content = data["choices"][0]["message"]["content"]
                 if content and content.strip():
                     return content.strip()
-                else:
-                    logger.warning(f"Модель {model} вернула пустой ответ")
         else:
-            logger.error(f"Ошибка API {model}: {response.status_code} - {response.text[:300]}")
-
+            logger.error(f"OpenRouter {model}: {response.status_code} - {response.text[:200]}")
     except Exception as e:
-        logger.error(f"Ошибка вызова {model}: {e}")
+        logger.error(f"Ошибка OpenRouter {model}: {e}")
 
     return None
 
@@ -116,29 +156,30 @@ def process_text(chat_id, text):
     send_typing(chat_id)
 
     history = chat_histories.get(chat_id, [])
-    messages = [
-        {"role": "system", "content": "Ты полезный ассистент. Отвечай кратко и по делу на русском языке."}
-    ]
-    for msg in history[-MAX_HISTORY:]:
-        messages.append(msg)
-    messages.append({"role": "user", "content": text})
 
-    models = [
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "deepseek/deepseek-chat-v3-0324:free",
-        "mistralai/mistral-7b-instruct:free"
-    ]
+    # Пробуем Gemini
+    reply = call_gemini_text(history[-MAX_HISTORY:], text)
 
-    reply = None
-    for model in models:
-        reply = call_openrouter(messages, model)
-        if reply:
-            break
-        time.sleep(1)
+    # Fallback на OpenRouter
+    if not reply:
+        logger.info("Gemini недоступен, пробую OpenRouter...")
+        messages = [
+            {"role": "system", "content": "Ты полезный ассистент. Отвечай кратко и по делу на русском языке."}
+        ]
+        for msg in history[-MAX_HISTORY:]:
+            messages.append(msg)
+        messages.append({"role": "user", "content": text})
+
+        for model in ["meta-llama/llama-3.3-70b-instruct:free", "deepseek/deepseek-chat-v3-0324:free"]:
+            reply = call_openrouter(messages, model)
+            if reply:
+                break
+            time.sleep(1)
 
     if not reply:
-        reply = "❌ Модели временно недоступны. Попробуйте через минуту."
+        reply = "❌ Сервисы временно недоступны. Попробуйте через минуту."
 
+    # Сохраняем историю
     if chat_id not in chat_histories:
         chat_histories[chat_id] = []
     chat_histories[chat_id].append({"role": "user", "content": text})
@@ -156,70 +197,43 @@ def process_photo(chat_id, file_id, caption):
         send_telegram_message(chat_id, "❌ Не удалось получить изображение от Telegram")
         return
 
-    image_base64 = download_image(file_url)
-    if not image_base64:
+    image_bytes = download_image_bytes(file_url)
+    if not image_bytes:
         send_telegram_message(chat_id, "❌ Не удалось скачать изображение")
         return
 
-    logger.info(f"Изображение получено, размер base64: {len(image_base64)} символов")
-
     prompt = caption if caption else "Опиши подробно, что изображено на этой картинке."
 
-    vision_models = [
-        "google/gemini-2.0-flash-exp:free",
-        "qwen/qwen2.5-vl-72b-instruct:free",
-        "meta-llama/llama-4-scout:free",
-        "google/gemini-2.5-pro-exp-03-25:free"
-    ]
+    logger.info(f"Анализирую изображение через Gemini, размер: {len(image_bytes)} байт")
 
-    def make_messages(image_source):
-        return [
-            {
-                "role": "system",
-                "content": "Ты полезный ассистент с возможностью анализа изображений. Отвечай подробно на русском языке."
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": image_source}
-                    },
-                    {
-                        "type": "text",
-                        "text": prompt
-                    }
-                ]
-            }
-        ]
+    # Gemini vision — основной
+    reply = call_gemini_vision(image_bytes, prompt)
 
-    reply = None
+    if reply:
+        logger.info("✅ Gemini успешно проанализировал изображение")
+    else:
+        logger.warning("Gemini не справился, пробую OpenRouter...")
+        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
 
-    # Попытка 1: base64
-    for model in vision_models:
-        logger.info(f"Пробую base64, модель: {model}")
-        reply = call_openrouter(make_messages(f"data:image/jpeg;base64,{image_base64}"), model)
-        if reply:
-            logger.info(f"✅ Успех (base64) с моделью: {model}")
-            break
-        time.sleep(2)
-
-    # Попытка 2: прямой URL
-    if not reply:
-        logger.info("Base64 не сработал, пробую через прямой URL...")
-        for model in vision_models:
-            logger.info(f"Пробую URL, модель: {model}")
-            reply = call_openrouter(make_messages(file_url), model)
+        for model in ["google/gemini-2.0-flash-exp:free", "qwen/qwen2.5-vl-72b-instruct:free"]:
+            messages = [
+                {"role": "system", "content": "Ты ассистент с анализом изображений. Отвечай на русском."},
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                    {"type": "text", "text": prompt}
+                ]}
+            ]
+            reply = call_openrouter(messages, model)
             if reply:
-                logger.info(f"✅ Успех (URL) с моделью: {model}")
                 break
             time.sleep(2)
 
     if not reply:
-        reply = "❌ Все vision-модели временно недоступны. Попробуйте позже или опишите изображение текстом."
+        reply = "❌ Не удалось проанализировать изображение. Попробуйте позже."
 
     send_telegram_message(chat_id, reply)
 
+# ================= FLASK ROUTES =================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -235,7 +249,7 @@ def webhook():
 
         if text == "/start":
             send_telegram_message(chat_id,
-                "👋 Привет! Я AI-ассистент.\n\n"
+                "👋 Привет! Я AI-ассистент на базе Gemini.\n\n"
                 "• Напиши вопрос — отвечу\n"
                 "• Отправь фото — проанализирую\n"
                 "• Фото с подписью — выполню задание\n\n"
@@ -313,7 +327,7 @@ def home():
     <head><title>Telegram Bot</title></head>
     <body>
         <h1>🤖 Bot is running!</h1>
-        <p>Version: 4.1 (Vision Fixed)</p>
+        <p>Version: 5.0 (Gemini Vision)</p>
         <ul>
             <li><a href="/setwebhook">Set Webhook</a></li>
         </ul>
