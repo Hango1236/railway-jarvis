@@ -6,6 +6,8 @@ from urllib3.util.retry import Retry
 from flask import Flask, request
 import logging
 import threading
+from collections import defaultdict
+from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -14,6 +16,43 @@ app = Flask(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+
+# Хранилище истории диалогов (в памяти)
+# Структура: {chat_id: {"messages": [список сообщений], "last_time": datetime}}
+chat_histories = defaultdict(lambda: {"messages": [], "last_time": datetime.now()})
+HISTORY_TTL = timedelta(minutes=30)  # Время жизни истории
+MAX_HISTORY_MESSAGES = 10  # Максимальное количество сообщений в истории
+
+def clean_old_histories():
+    """Очистка старых диалогов (запускается периодически)"""
+    now = datetime.now()
+    to_delete = []
+    for chat_id, data in chat_histories.items():
+        if now - data["last_time"] > HISTORY_TTL:
+            to_delete.append(chat_id)
+    for chat_id in to_delete:
+        del chat_histories[chat_id]
+        logger.info(f"Очищена история для чата {chat_id}")
+
+def add_to_history(chat_id, role, content):
+    """Добавление сообщения в историю диалога"""
+    clean_old_histories()  # Очищаем старые диалоги при добавлении нового
+    
+    history = chat_histories[chat_id]
+    history["messages"].append({"role": role, "content": content})
+    history["last_time"] = datetime.now()
+    
+    # Ограничиваем длину истории
+    if len(history["messages"]) > MAX_HISTORY_MESSAGES * 2:  # *2 потому что храним и user и assistant
+        history["messages"] = history["messages"][-MAX_HISTORY_MESSAGES * 2:]
+    
+    logger.info(f"Добавлено в историю чата {chat_id}: {role} ({len(history['messages'])} сообщений всего)")
+
+def get_recent_history(chat_id):
+    """Получение недавней истории диалога"""
+    clean_old_histories()
+    data = chat_histories.get(chat_id, {"messages": [], "last_time": datetime.now()})
+    return data["messages"][-MAX_HISTORY_MESSAGES:]  # Возвращаем последние N сообщений
 
 def make_session():
     s = requests.Session()
@@ -100,37 +139,63 @@ class OpenRouterAI:
 
             if "error" in result:
                 err = result["error"]
+                # Проверяем специфические ошибки моделей
                 msg = err.get("message", str(err))
-                return None, f"{err.get('code', '')} {msg}"
+                error_code = err.get('code', '')
+                
+                # Если модель перегружена или недоступна
+                if any(x in msg.lower() for x in ["overloaded", "rate limit", "too many requests", "quota"]):
+                    return None, f"MODEL_BUSY: {msg}"
+                
+                return None, f"{error_code} {msg}"
 
             return None, f"Неизвестный ответ: {list(result.keys())}"
 
         except requests.exceptions.Timeout:
-            return None, "Таймаут"
+            return None, "MODEL_BUSY: Таймаут (модель не отвечает)"
         except Exception as e:
             return None, str(e)
 
-    def generate_text(self, user_text):
+    def generate_text(self, chat_id, user_text):
+        # Получаем историю диалога
+        history = get_recent_history(chat_id)
+        
+        # Формируем сообщения с историей
         messages = [
             {"role": "system", "content": (
                 "Ты полезный ассистент. Отвечай кратко и по делу на языке пользователя. "
                 "ВАЖНО: никогда не используй LaTeX ($, $$, \\frac, \\sqrt, \\boxed и т.д.) — "
                 "Telegram это не рендерит. Формулы пиши простым текстом: sqrt(5)/5, x^2, "
-                "используй Unicode-символы: ²³√±≤≥≠π."
-            )},
-            {"role": "user", "content": user_text}
+                "используй Unicode-символы: ²³√±≤≥≠π. Помни контекст предыдущих сообщений в диалоге."
+            )}
         ]
+        
+        # Добавляем историю диалога
+        messages.extend(history)
+        
+        # Добавляем текущее сообщение пользователя
+        messages.append({"role": "user", "content": user_text})
+        
+        # Пробуем модели по очереди
         for model in self.text_models:
             text, err = self._call(model, messages)
             if text:
+                # Сохраняем успешный ответ в историю
+                add_to_history(chat_id, "user", user_text)
+                add_to_history(chat_id, "assistant", text)
                 return text
             logger.warning(f"❌ {model}: {err}")
-        return "❌ Все модели недоступны. Попробуй позже."
+        
+        # Если все модели недоступны
+        return "❌ Все модели временно недоступны. Пожалуйста, попробуйте позже."
 
-    def generate_with_image(self, caption, image_base64):
+    def generate_with_image(self, chat_id, caption, image_base64):
         if not self.available:
             return "❌ OPENROUTER_API_KEY не задан"
 
+        # Получаем историю диалога
+        history = get_recent_history(chat_id)
+        
         prompt = caption if caption else "Что изображено на картинке? Опиши подробно."
 
         system_prompt = (
@@ -138,49 +203,78 @@ class OpenRouterAI:
             "ВАЖНО: никогда не используй LaTeX-разметку ($, $$, \\frac, \\sqrt, \\boxed и т.д.) — "
             "Telegram её не поддерживает и пользователь увидит мусор. "
             "Формулы пиши простым текстом: например 'sqrt(5)/5' вместо '\\frac{\\sqrt{5}}{5}', "
-            "'x^2' вместо '\\x^{2}'. Используй только обычный текст и Unicode-символы (²³√±≤≥≠)."
+            "'x^2' вместо '\\x^{2}'. Используй только обычный текст и Unicode-символы (²³√±≤≥≠). "
+            "Помни контекст предыдущих сообщений в диалоге."
         )
 
         messages = [
             {
                 "role": "system",
                 "content": system_prompt
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_base64}",
-                            "detail": "high"
-                        }
-                    },
-                    {
-                        "type": "text",
-                        "text": prompt
-                    }
-                ]
             }
         ]
+        
+        # Добавляем историю диалога
+        messages.extend(history)
+        
+        # Добавляем текущее сообщение с изображением
+        messages.append({
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{image_base64}",
+                        "detail": "high"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": prompt
+                }
+            ]
+        })
 
         errors = []
+        busy_models = 0
+        
         for model in self.vision_models:
             logger.info(f"Vision: пробую {model}")
             text, err = self._call(model, messages)
             if text:
                 logger.info(f"✅ Vision успех: {model}")
+                # Сохраняем в историю
+                add_to_history(chat_id, "user", f"[Изображение] {prompt}")
+                add_to_history(chat_id, "assistant", text)
                 return text
-            logger.warning(f"❌ Vision {model}: {err}")
+            
+            # Считаем перегруженные модели
+            if err and "MODEL_BUSY" in err:
+                busy_models += 1
+                logger.warning(f"⏳ Vision модель {model} перегружена")
+            else:
+                logger.warning(f"❌ Vision {model}: {err}")
+            
             errors.append(f"{model}: {err}")
 
-        # Все vision-модели упали — честно говорим об этом
+        # Если все модели перегружены
+        if busy_models == len(self.vision_models):
+            return (
+                "⚠️ **Все vision-модели сейчас перегружены**\n\n"
+                "Попробуйте:\n"
+                "• Отправить изображение через 1-2 минуты\n"
+                "• Описать задачу текстом\n"
+                "• Использовать другое изображение (возможно, проблема в формате)"
+            )
+        
+        # Другие ошибки
         err_details = "\n".join(errors)
         logger.error(f"Все vision-модели упали:\n{err_details}")
         return (
-            "⚠️ Не удалось проанализировать изображение — все vision-модели сейчас перегружены.\n\n"
-            "Попробуй:\n"
-            "• Повторить отправку через минуту\n"
+            "⚠️ **Не удалось проанализировать изображение**\n\n"
+            "Попробуйте:\n"
+            "• Отправить изображение в другом формате (JPEG/PNG)\n"
+            "• Уменьшить размер изображения\n"
             "• Описать задачу текстом"
         )
 
@@ -190,6 +284,8 @@ ai = OpenRouterAI()
 def send_msg(chat_id, text):
     t = text[:4000] + "..." if len(text) > 4000 else text
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    
+    # Пробуем отправить с Markdown, если не получается - без форматирования
     for parse_mode in ["Markdown", None]:
         payload = {"chat_id": chat_id, "text": t}
         if parse_mode:
@@ -218,7 +314,7 @@ def send_typing(chat_id):
 # ================= ОБРАБОТКА =================
 def process_text(chat_id, text):
     send_typing(chat_id)
-    reply = ai.generate_text(text)
+    reply = ai.generate_text(chat_id, text)  # Передаём chat_id для истории
     send_msg(chat_id, reply)
 
 def process_photo(chat_id, file_id, caption):
@@ -237,7 +333,7 @@ def process_photo(chat_id, file_id, caption):
     send_msg(chat_id, "🔍 Анализирую изображение...")
     send_typing(chat_id)
 
-    reply = ai.generate_with_image(caption, image_base64)
+    reply = ai.generate_with_image(chat_id, caption, image_base64)  # Передаём chat_id
     send_msg(chat_id, reply)
 
 # ================= FLASK =================
@@ -253,20 +349,39 @@ def webhook():
         text = msg.get("text", "").strip()
 
         if text == "/start":
+            # Очищаем историю при новом старте
+            if chat_id in chat_histories:
+                del chat_histories[chat_id]
             send_async(chat_id,
                 "👋 Привет! Я AI-ассистент.\n\n"
-                "• Задай любой вопрос текстом\n"
-                "• Отправь фото с подписью — разберу задачу на картинке 🖼"
+                "• Задай любой вопрос текстом — я помню контекст диалога\n"
+                "• Отправь фото с подписью — разберу задачу на картинке 🖼\n"
+                "• /clear — очистить историю диалога\n"
+                "• /help — помощь"
             )
             return "OK", 200
 
         if text == "/help":
             send_async(chat_id,
-                "📖 Как пользоваться:\n"
-                "• Напиши вопрос — отвечу\n"
+                "📖 **Как пользоваться:**\n"
+                "• Напиши вопрос — отвечу с учётом контекста\n"
                 "• Отправь фото задачи с подписью «реши» или «что здесь?»\n"
-                "• Фото без подписи — опишу что на нём"
+                "• Фото без подписи — опишу что на нём\n"
+                "• /clear — очистить историю диалога\n"
+                "• /stats — статистика диалога"
             )
+            return "OK", 200
+            
+        if text == "/clear":
+            if chat_id in chat_histories:
+                del chat_histories[chat_id]
+            send_async(chat_id, "🧹 История диалога очищена!")
+            return "OK", 200
+            
+        if text == "/stats":
+            history = get_recent_history(chat_id)
+            msg_count = len(history)
+            send_async(chat_id, f"📊 Статистика диалога:\n• Сообщений в истории: {msg_count}\n• Максимум хранится: {MAX_HISTORY_MESSAGES} последних сообщений")
             return "OK", 200
 
         # Фото
@@ -315,26 +430,20 @@ def set_webhook():
 @app.route('/debug')
 def debug():
     import json
-    # Тестовый vision-запрос с маленькой картинкой (1x1 белый пиксель)
-    test_b64 = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFgABAQEAAAAAAAAAAAAAAAAABgUEB/8QAIhAAAQQCAgMBAAAAAAAAAAAAAQIDBBEhBRIxQf/EABQBAQAAAAAAAAAAAAAAAAAAAAD/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCBmtf6ppWhX2UWeR5HJKi+/wAYWWV1pPAAJ2E+ABiilAP/2Q=="
-    results = {}
-    for model in ai.vision_models:
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{test_b64}"}},
-                {"type": "text", "text": "Say OK"}
-            ]
-        }]
-        text, err = ai._call(model, messages)
-        results[model] = text if text else f"FAIL: {err}"
-
-    return f"<pre>{json.dumps(results, ensure_ascii=False, indent=2)}</pre>"
+    return f"""
+    <pre>
+    Bot Status: OK
+    Chat Histories: {len(chat_histories)} active chats
+    MAX_HISTORY_MESSAGES: {MAX_HISTORY_MESSAGES}
+    HISTORY_TTL: {HISTORY_TTL}
+    </pre>
+    <a href='/'>Home</a>
+    """
 
 
 @app.route('/')
 def home():
-    return "🤖 Бот работает! <a href='/debug'>Тест vision-моделей</a> | <a href='/setwebhook'>Webhook</a>"
+    return "🤖 Бот работает с поддержкой контекста! <a href='/debug'>Debug</a> | <a href='/setwebhook'>Webhook</a>"
 
 
 if __name__ == "__main__":
