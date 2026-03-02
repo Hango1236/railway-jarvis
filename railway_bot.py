@@ -5,14 +5,12 @@ import logging
 import threading
 import time
 from flask import Flask, request
-import google.generativeai as genai
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ================= КОНФИГУРАЦИЯ =================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -23,8 +21,6 @@ if not OPENROUTER_API_KEY:
     logger.error("❌ OPENROUTER_API_KEY не задан!")
 if not GEMINI_API_KEY:
     logger.error("❌ GEMINI_API_KEY не задан!")
-else:
-    genai.configure(api_key=GEMINI_API_KEY)
 
 chat_histories = {}
 MAX_HISTORY = 10
@@ -78,37 +74,72 @@ def send_typing(chat_id):
 
 # ================= AI ФУНКЦИИ =================
 def call_gemini_vision(image_bytes, prompt):
-    """Анализ изображения через Gemini"""
+    """Анализ изображения через Gemini REST API"""
+    if not GEMINI_API_KEY:
+        return None
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        image_part = {
-            "mime_type": "image/jpeg",
-            "data": image_bytes
+        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": image_base64
+                            }
+                        },
+                        {
+                            "text": prompt
+                        }
+                    ]
+                }
+            ]
         }
-        response = model.generate_content([image_part, prompt])
-        if response and response.text:
-            return response.text.strip()
+        response = requests.post(url, json=payload, timeout=60)
+        logger.info(f"Gemini vision статус: {response.status_code}")
+        if response.status_code == 200:
+            data = response.json()
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            if text and text.strip():
+                return text.strip()
+        else:
+            logger.error(f"Gemini vision ошибка: {response.status_code} - {response.text[:300]}")
     except Exception as e:
         logger.error(f"Ошибка Gemini vision: {e}")
     return None
 
-def call_gemini_text(messages_history, text):
-    """Текстовый запрос через Gemini"""
+def call_gemini_text(history, text):
+    """Текстовый запрос через Gemini REST API"""
+    if not GEMINI_API_KEY:
+        return None
     try:
-        model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
-            system_instruction="Ты полезный ассистент. Отвечай кратко и по делу на русском языке."
-        )
-        # Конвертируем историю в формат Gemini
-        history = []
-        for msg in messages_history:
-            role = "user" if msg["role"] == "user" else "model"
-            history.append({"role": role, "parts": [msg["content"]]})
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
 
-        chat = model.start_chat(history=history)
-        response = chat.send_message(text)
-        if response and response.text:
-            return response.text.strip()
+        # Формируем contents из истории
+        contents = []
+        for msg in history[-MAX_HISTORY:]:
+            role = "user" if msg["role"] == "user" else "model"
+            contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+        contents.append({"role": "user", "parts": [{"text": text}]})
+
+        payload = {
+            "system_instruction": {
+                "parts": [{"text": "Ты полезный ассистент. Отвечай кратко и по делу на русском языке."}]
+            },
+            "contents": contents
+        }
+
+        response = requests.post(url, json=payload, timeout=60)
+        logger.info(f"Gemini text статус: {response.status_code}")
+        if response.status_code == 200:
+            data = response.json()
+            text_reply = data["candidates"][0]["content"]["parts"][0]["text"]
+            if text_reply and text_reply.strip():
+                return text_reply.strip()
+        else:
+            logger.error(f"Gemini text ошибка: {response.status_code} - {response.text[:300]}")
     except Exception as e:
         logger.error(f"Ошибка Gemini text: {e}")
     return None
@@ -117,21 +148,18 @@ def call_openrouter(messages, model):
     """Fallback через OpenRouter"""
     if not OPENROUTER_API_KEY:
         return None
-
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://t.me/yourbot",
         "X-Title": "Telegram Bot"
     }
-
     payload = {
         "model": model,
         "messages": messages,
         "temperature": 0.7,
         "max_tokens": 1500
     }
-
     try:
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
@@ -149,18 +177,16 @@ def call_openrouter(messages, model):
             logger.error(f"OpenRouter {model}: {response.status_code} - {response.text[:200]}")
     except Exception as e:
         logger.error(f"Ошибка OpenRouter {model}: {e}")
-
     return None
 
 def process_text(chat_id, text):
     send_typing(chat_id)
-
     history = chat_histories.get(chat_id, [])
 
-    # Пробуем Gemini
-    reply = call_gemini_text(history[-MAX_HISTORY:], text)
+    # Основной — Gemini
+    reply = call_gemini_text(history, text)
 
-    # Fallback на OpenRouter
+    # Fallback — OpenRouter
     if not reply:
         logger.info("Gemini недоступен, пробую OpenRouter...")
         messages = [
@@ -169,7 +195,6 @@ def process_text(chat_id, text):
         for msg in history[-MAX_HISTORY:]:
             messages.append(msg)
         messages.append({"role": "user", "content": text})
-
         for model in ["meta-llama/llama-3.3-70b-instruct:free", "deepseek/deepseek-chat-v3-0324:free"]:
             reply = call_openrouter(messages, model)
             if reply:
@@ -179,7 +204,6 @@ def process_text(chat_id, text):
     if not reply:
         reply = "❌ Сервисы временно недоступны. Попробуйте через минуту."
 
-    # Сохраняем историю
     if chat_id not in chat_histories:
         chat_histories[chat_id] = []
     chat_histories[chat_id].append({"role": "user", "content": text})
@@ -203,18 +227,17 @@ def process_photo(chat_id, file_id, caption):
         return
 
     prompt = caption if caption else "Опиши подробно, что изображено на этой картинке."
+    logger.info(f"Анализирую изображение, размер: {len(image_bytes)} байт")
 
-    logger.info(f"Анализирую изображение через Gemini, размер: {len(image_bytes)} байт")
-
-    # Gemini vision — основной
+    # Основной — Gemini
     reply = call_gemini_vision(image_bytes, prompt)
-
     if reply:
         logger.info("✅ Gemini успешно проанализировал изображение")
-    else:
-        logger.warning("Gemini не справился, пробую OpenRouter...")
-        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
 
+    # Fallback — OpenRouter
+    if not reply:
+        logger.info("Gemini не справился, пробую OpenRouter...")
+        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
         for model in ["google/gemini-2.0-flash-exp:free", "qwen/qwen2.5-vl-72b-instruct:free"]:
             messages = [
                 {"role": "system", "content": "Ты ассистент с анализом изображений. Отвечай на русском."},
@@ -327,10 +350,8 @@ def home():
     <head><title>Telegram Bot</title></head>
     <body>
         <h1>🤖 Bot is running!</h1>
-        <p>Version: 5.0 (Gemini Vision)</p>
-        <ul>
-            <li><a href="/setwebhook">Set Webhook</a></li>
-        </ul>
+        <p>Version: 5.1 (Gemini REST)</p>
+        <ul><li><a href="/setwebhook">Set Webhook</a></li></ul>
     </body>
     </html>
     """
