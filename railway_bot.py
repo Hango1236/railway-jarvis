@@ -8,9 +8,17 @@ import logging
 import threading
 from collections import defaultdict
 from datetime import datetime, timedelta
-from PIL import Image
-import io
 import time
+import sys
+
+# Попытка импорта PIL с обработкой ошибки
+try:
+    from PIL import Image
+    import io
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    logging.warning("PIL не установлен. Функции обработки изображений будут ограничены.")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,6 +27,12 @@ app = Flask(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+
+# Проверка наличия необходимых переменных
+if not TELEGRAM_TOKEN:
+    logger.error("TELEGRAM_TOKEN не задан!")
+if not OPENROUTER_API_KEY:
+    logger.error("OPENROUTER_API_KEY не задан!")
 
 # Хранилище истории диалогов
 chat_histories = defaultdict(lambda: {"messages": [], "last_time": datetime.now()})
@@ -94,7 +108,7 @@ def download_and_process_image(file_url, max_size=1024, max_file_size=5*1024*102
         r = session.get(file_url, timeout=(30, 60))
         if r.status_code != 200:
             logger.error(f"Ошибка скачивания: {r.status_code}")
-            return None
+            return None, "download_error"
         
         # Проверяем размер файла
         content_length = len(r.content)
@@ -104,30 +118,41 @@ def download_and_process_image(file_url, max_size=1024, max_file_size=5*1024*102
             logger.warning(f"Изображение слишком большое: {content_length} > {max_file_size}")
             return None, "too_large"
         
-        # Открываем изображение
-        image = Image.open(io.BytesIO(r.content))
+        # Если PIL недоступен, возвращаем как есть
+        if not PIL_AVAILABLE:
+            logger.info("PIL не доступен, возвращаем оригинальное изображение")
+            return base64.b64encode(r.content).decode("utf-8"), None
         
-        # Конвертируем в RGB если нужно
-        if image.mode in ('RGBA', 'LA', 'P'):
-            rgb_image = Image.new('RGB', image.size, (255, 255, 255))
-            rgb_image.paste(image, mask=image.split()[-1] if image.mode == 'RGBA' else None)
-            image = rgb_image
-        
-        # Проверяем и уменьшаем размер
-        original_size = image.size
-        if max(image.width, image.height) > max_size:
-            ratio = max_size / max(image.width, image.height)
-            new_size = (int(image.width * ratio), int(image.height * ratio))
-            image = image.resize(new_size, Image.Resampling.LANCZOS)
-            logger.info(f"Изображение уменьшено: {original_size} -> {image.size}")
-        
-        # Сохраняем с оптимизацией
-        buffer = io.BytesIO()
-        image.save(buffer, format="JPEG", quality=85, optimize=True)
-        compressed_size = len(buffer.getvalue())
-        logger.info(f"Размер после сжатия: {compressed_size} байт")
-        
-        return base64.b64encode(buffer.getvalue()).decode("utf-8"), None
+        # Обработка с PIL
+        try:
+            image = Image.open(io.BytesIO(r.content))
+            
+            # Конвертируем в RGB если нужно
+            if image.mode in ('RGBA', 'LA', 'P'):
+                rgb_image = Image.new('RGB', image.size, (255, 255, 255))
+                rgb_image.paste(image, mask=image.split()[-1] if image.mode == 'RGBA' else None)
+                image = rgb_image
+            
+            # Проверяем и уменьшаем размер
+            original_size = image.size
+            if max(image.width, image.height) > max_size:
+                ratio = max_size / max(image.width, image.height)
+                new_size = (int(image.width * ratio), int(image.height * ratio))
+                image = image.resize(new_size, Image.Resampling.LANCZOS)
+                logger.info(f"Изображение уменьшено: {original_size} -> {image.size}")
+            
+            # Сохраняем с оптимизацией
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=85, optimize=True)
+            compressed_size = len(buffer.getvalue())
+            logger.info(f"Размер после сжатия: {compressed_size} байт")
+            
+            return base64.b64encode(buffer.getvalue()).decode("utf-8"), None
+            
+        except Exception as e:
+            logger.error(f"Ошибка обработки PIL: {e}")
+            # Возвращаем оригинал в случае ошибки
+            return base64.b64encode(r.content).decode("utf-8"), None
         
     except Exception as e:
         logger.error(f"Ошибка обработки изображения: {e}")
@@ -149,7 +174,6 @@ class OpenRouterAI:
             "meta-llama/llama-3.2-11b-vision-instruct:free",
             "google/gemini-2.0-flash-exp:free",
             "mistralai/mistral-small-3.1-24b-instruct:free",
-            "deepseek/deepseek-vl2:free",
         ]
 
         self.all_text_models = [
@@ -157,8 +181,6 @@ class OpenRouterAI:
             "meta-llama/llama-3.3-70b-instruct:free",
             "deepseek/deepseek-r1:free",
             "deepseek/deepseek-chat-v3-0324:free",
-            "microsoft/phi-3.5-mini-128k-instruct:free",
-            "google/gemini-flash-1.5-8b:free",
         ]
 
     def get_working_models(self, model_type="vision"):
@@ -179,9 +201,7 @@ class OpenRouterAI:
         for model in models[:3]:  # Тестируем только первые 3 для скорости
             try:
                 # Быстрый тест модели
-                test_messages = [{"role": "user", "content": "Say 'ok' in one word"}]
-                if model_type == "vision":
-                    test_messages = [{"role": "user", "content": [{"type": "text", "text": "Say 'ok'"}]}]
+                test_messages = [{"role": "user", "content": "Say 'ok'"}]
                 
                 resp = session.post(
                     "https://openrouter.ai/api/v1/chat/completions",
@@ -213,7 +233,7 @@ class OpenRouterAI:
             time.sleep(0.5)  # Небольшая задержка между запросами
         
         # Обновляем кэш
-        working_models_cache[model_type] = working or models
+        working_models_cache[model_type] = working if working else models
         working_models_cache["last_check"] = datetime.now()
         
         logger.info(f"Найдено рабочих {model_type} моделей: {len(working)}")
@@ -536,4 +556,166 @@ def webhook():
 
         # Команды
         if text == "/start":
-   
+            if chat_id in chat_histories:
+                del chat_histories[chat_id]
+            send_async(chat_id,
+                "👋 **Привет! Я AI-ассистент**\n\n"
+                "**Возможности:**\n"
+                "• 📝 Текстовые запросы с контекстом\n"
+                "• 🖼 Анализ изображений\n"
+                "• 💬 Запоминаю историю диалога\n\n"
+                "**Команды:**\n"
+                "/clear - очистить историю\n"
+                "/stats - статистика\n"
+                "/models - доступные модели\n"
+                "/help - помощь"
+            )
+            return "OK", 200
+
+        if text == "/help":
+            send_async(chat_id,
+                "📖 **Помощь**\n\n"
+                "**Как пользоваться:**\n"
+                "• Просто напишите вопрос\n"
+                "• Отправьте фото с подписью\n"
+                "• Фото без подписи - опишу что на нём\n\n"
+                "**Советы:**\n"
+                "• Для формул используйте простой текст\n"
+                "• Изображения до 5 МБ\n"
+                "• Контекст хранится 30 минут"
+            )
+            return "OK", 200
+            
+        if text == "/clear":
+            if chat_id in chat_histories:
+                del chat_histories[chat_id]
+            send_async(chat_id, "🧹 **История диалога очищена!**")
+            return "OK", 200
+            
+        if text == "/stats":
+            history = get_recent_history(chat_id)
+            msg_count = len(history)
+            send_async(chat_id, 
+                f"📊 **Статистика**\n\n"
+                f"• Сообщений в истории: {msg_count}\n"
+                f"• Максимум хранится: {MAX_HISTORY_MESSAGES}\n"
+                f"• Время жизни: 30 минут\n"
+                f"• Всего запросов: {ai.request_count}\n"
+                f"• Ошибок: {ai.error_count}")
+            return "OK", 200
+            
+        if text == "/models":
+            vision_models = ai.get_working_models("vision")
+            text_models = ai.get_working_models("text")
+            send_async(chat_id,
+                f"🤖 **Доступные модели**\n\n"
+                f"**Vision:**\n" + "\n".join('• ' + m for m in vision_models[:5]) + "\n\n"
+                f"**Text:**\n" + "\n".join('• ' + m for m in text_models[:5]))
+            return "OK", 200
+
+        # Обработка фото
+        if "photo" in msg:
+            file_id = msg["photo"][-1]["file_id"]
+            caption = msg.get("caption", "").strip()
+            logger.info(f"Фото от {chat_id}, подпись: '{caption}'")
+            threading.Thread(target=process_photo, args=(chat_id, file_id, caption), daemon=True).start()
+            return "OK", 200
+
+        # Обработка документа (изображение)
+        if "document" in msg:
+            doc = msg["document"]
+            if doc.get("mime_type", "").startswith("image/"):
+                caption = msg.get("caption", "").strip()
+                threading.Thread(target=process_photo, args=(chat_id, doc["file_id"], caption), daemon=True).start()
+                return "OK", 200
+
+        # Обработка текста
+        if text:
+            threading.Thread(target=process_text, args=(chat_id, text), daemon=True).start()
+
+        return "OK", 200
+
+    except Exception as e:
+        logger.error(f"webhook error: {e}")
+        return "OK", 200  # Возвращаем OK даже при ошибке, чтобы Telegram не повторял
+
+@app.route('/setwebhook', methods=['GET'])
+def set_webhook():
+    """Установка webhook"""
+    railway_url = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+    if not railway_url:
+        railway_url = request.host
+    webhook_url = f"https://{railway_url}/webhook"
+    try:
+        r = session.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook",
+            params={"url": webhook_url},
+            timeout=30
+        )
+        result = r.json()
+        if result.get("ok"):
+            return f"✅ Webhook установлен: {webhook_url}"
+        else:
+            return f"❌ Ошибка: {result}"
+    except Exception as e:
+        return f"❌ Ошибка: {e}"
+
+@app.route('/debug', methods=['GET'])
+def debug():
+    """Отладка"""
+    vision_models = ai.get_working_models("vision")
+    text_models = ai.get_working_models("text")
+    
+    return f"""
+    <html>
+    <head><title>Bot Debug</title></head>
+    <body>
+        <h1>🤖 Bot Status</h1>
+        <pre>
+API Key: {'✅' if OPENROUTER_API_KEY else '❌'}
+Telegram Token: {'✅' if TELEGRAM_TOKEN else '❌'}
+PIL Available: {'✅' if PIL_AVAILABLE else '❌'}
+
+📊 Статистика:
+- Активных чатов: {len(chat_histories)}
+- Всего запросов: {ai.request_count}
+- Ошибок: {ai.error_count}
+
+🤖 Vision модели ({len(vision_models)}):
+{chr(10).join('  • ' + m for m in vision_models[:5])}
+
+📝 Text модели ({len(text_models)}):
+{chr(10).join('  • ' + m for m in text_models[:5])}
+
+⚙️ Настройки:
+- MAX_HISTORY_MESSAGES: {MAX_HISTORY_MESSAGES}
+- HISTORY_TTL: {HISTORY_TTL}
+        </pre>
+        <p><a href='/'>На главную</a> | <a href='/setwebhook'>Установить webhook</a></p>
+    </body>
+    </html>
+    """
+
+@app.route('/', methods=['GET'])
+def home():
+    return """
+    <html>
+    <head><title>Telegram Bot</title></head>
+    <body>
+        <h1>🤖 Бот работает!</h1>
+        <p>Версия: 2.1 (исправлено для Railway)</p>
+        <ul>
+            <li><a href='/debug'>Отладка</a></li>
+            <li><a href='/setwebhook'>Установить webhook</a></li>
+        </ul>
+    </body>
+    </html>
+    """
+
+# Для Railway нужно обязательно определить app как WSGI-приложение
+# Это то, что ищет gunicorn
+application = app
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, debug=False)
